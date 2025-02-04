@@ -19,7 +19,7 @@ The code currently contains the following codes:
 - `fun_zero` - Finding the root of a single-valued function within a bounded interval
 - `poly_roots`- Finds the real and complex roots of an nth-degree polynomial
 
-Detailed documentation on how to use the codes is provided in the PDF "Roots User Guid.pdf." 
+Detailed documentation on how to use the codes is provided in the PDF "FORTRAN_Roots_User_Guide.pdf" 
 
 
 
