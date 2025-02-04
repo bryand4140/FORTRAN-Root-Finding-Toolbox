@@ -8,6 +8,11 @@ program test
     procedure(sv_function), pointer :: f_pointer => null()
     type(fun_zero_options) :: options
 
+    real(pv) :: coeff(3)
+    complex(pv) :: pzeros(2)
+    integer :: deg
+
+
 
     bounds = [-2.0, 2.0]
     f_pointer => f
@@ -17,7 +22,15 @@ program test
     options%maxiter         = 100
     options%tolerance       = 1.0E-6_pv
 
-    call fun_zero(f_pointer, bounds, status, root, f0_options = options)
+    !call fun_zero(f_pointer, bounds, status, root, f0_options = options)
+    coeff = [1.0, -1.0, -3.0]
+    deg   = 2
+    call poly_roots(coeff, deg, pzeros, status)
+    if(status == 0) then
+        print *, 'Roots: ', pzeros
+    else
+        print *, 'No roots found'
+    end if
 
 
     contains

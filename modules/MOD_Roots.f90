@@ -6,6 +6,7 @@ module MOD_Roots
     private
     public :: fun_zero
     public :: sv_function
+    public :: poly_roots
 
     abstract interface
         function sv_function(x) result(y)
@@ -280,6 +281,153 @@ subroutine init_fun_zero_options(f0_options)
     f0_options%show_results    = .true.
 end subroutine init_fun_zero_options
 
+
+SUBROUTINE QR_Decomposition(A, Q, R, n, status)
+    !General Description: This subroutine performs a QR decomposition of a matrix A
+    !                     using the Gram-Schmidt process. The QR decomposition is
+    !                     a factorization of a matrix A into a product A = QR of an
+    !                     orthogonal matrix Q and an upper triangular matrix R.
+    !                     The QR decomposition is often used to solve the linear
+    !                     least squares problem, and is the basis for a particular
+    !                     eigenvalue algorithm.
+
+    !Input Parameters:
+    IMPLICIT NONE
+    INTEGER, INTENT(IN) :: n ! Size of the matrix A
+    REAL(pv), DIMENSION(n,n), INTENT(IN) :: A ! Matrix to be decomposed
+    REAL(pv), DIMENSION(n,n), INTENT(OUT) :: Q, R ! Q and R matrices
+
+    !Local Variables:
+    REAL(pv), DIMENSION(n) :: u, e ! Temporary vectors
+    INTEGER :: i, j ! Loop indices
+    INTEGER, INTENT(OUT) :: status ! Status of the decomposition
+
+    ! Initialize status to success
+    status = 0
+
+    ! Perform Error Checking
+    IF (SIZE(A,1) /= SIZE(A,2)) THEN
+        PRINT*, "ERROR: Matrix A must be square"
+        status = 1 ! Indicate error
+        RETURN
+    END IF
+
+    DO i = 1, n
+        u = A(:,i)
+        DO j = 1, i-1
+            R(j,i) = DOT_PRODUCT(Q(:,j), A(:,i))
+            u = u - R(j,i) * Q(:,j)
+        END DO
+        IF (NORM2(u) == 0.0_pv) THEN
+            PRINT*, "Error: Matrix is singular or nearly singular"
+            status = 2 ! Indicate error
+            RETURN
+        END IF
+        R(i,i) = NORM2(u)
+        e = u / R(i,i)
+        Q(:,i) = e
+    END DO
+END SUBROUTINE QR_Decomposition
+
+
+subroutine poly_roots(coeff, deg, roots, status)
+    ! Inputs:
+    !   coeff  - Real array of polynomial coefficients
+    !            (e.g., coeff(0) = constant term, coeff(deg) = leading coefficient)
+    !   deg    - Degree of the polynomial (deg >= 1)
+    ! Outputs:
+    !   roots  - Complex array of roots (length = deg)
+    !   status - Status flag: 0 if successful, nonzero otherwise.
+
+    implicit none
+    integer, intent(in)      :: deg
+    real(pv), intent(in)     :: coeff(0:deg)
+    complex(pv), intent(out) :: roots(deg)
+    integer, intent(out)     :: status
+
+    ! Local variables.
+    integer :: i, j, maxiter, iter, n
+    real(pv) :: tol
+    real(pv), allocatable :: comp_mat(:,:)
+    real(pv), allocatable :: Q(:,:), R(:,:)
+    integer :: qr_status
+    real(pv) :: offdiag_norm
+
+    ! Parameters for convergence.
+    tol = 1.0e-8_pv
+    maxiter = 1000
+    n = deg  ! The companion matrix is of size n x n
+
+    ! Allocate the companion matrix and Q, R matrices.
+    allocate(comp_mat(n, n))
+    allocate(Q(n, n))
+    allocate(R(n, n))
+
+    ! Form the companion matrix.
+    ! First, normalize coefficients (make polynomial monic)
+    if (abs(coeff(deg)) < tol) then
+       status = 1
+       print*, "Error: Leading coefficient is zero."
+       return
+    end if
+
+    ! Set the companion matrix to zero.
+    comp_mat = 0.0_pv
+
+    ! Fill in the subdiagonal with ones.
+    do i = 1, n-1
+       comp_mat(i+1, i) = 1.0_pv
+    end do
+
+    ! Fill in the first row: negative of normalized coefficients.
+    ! Note: if we assume coeff(0) is the constant term and coeff(deg) is the leading coefficient,
+    ! then the first row becomes: -coeff(deg-1:0)/coeff(deg)
+    do j = 1, n
+       comp_mat(1, j) = -coeff(j-1) / coeff(deg)
+    end do
+
+    ! QR Iteration loop.
+    iter = 0
+    do while (iter < maxiter)
+       iter = iter + 1
+
+       ! Call your QR decomposition subroutine.
+       call QR_Decomposition(comp_mat, Q, R, n, qr_status)
+       if (qr_status /= 0) then
+          status = 2
+          print*, "Error in QR decomposition."
+          return
+       end if
+
+       ! Update comp_mat = R * Q.
+       comp_mat = matmul(R, Q)
+
+       ! Check for convergence.
+       ! For a nearly upper triangular matrix, the subdiagonal entries should be small.
+       offdiag_norm = 0.0_pv
+       do i = 2, n
+          offdiag_norm = offdiag_norm + abs(comp_mat(i, i-1))**2
+       end do
+       offdiag_norm = sqrt(offdiag_norm)
+       if (offdiag_norm < tol) exit
+    end do
+
+    if (iter >= maxiter) then
+       status = 3
+       print*, "QR iteration did not converge."
+    else
+       status = 0
+    end if
+
+    ! Extract the eigenvalues from the (nearly) upper triangular matrix.
+    do i = 1, n
+       ! This simple version ignores the possibility of 2x2 blocks for complex pairs.
+       roots(i) = cmplx(comp_mat(i,i), 0.0_pv, kind=pv)
+    end do
+
+    ! Deallocate local arrays.
+    deallocate(comp_mat, Q, R)
+end subroutine poly_roots
 
   
 end module MOD_Roots
