@@ -7,6 +7,7 @@ module MOD_Roots
     public :: fun_zero
     public :: sv_function
     public :: poly_roots
+    
 
     abstract interface
         function sv_function(x) result(y)
@@ -16,7 +17,6 @@ module MOD_Roots
             real(pv)             :: y
         end function sv_function
     end interface
-
 
 
     type, public :: fun_zero_options
@@ -429,5 +429,411 @@ subroutine poly_roots(coeff, deg, roots, status)
     deallocate(comp_mat, Q, R)
 end subroutine poly_roots
 
+
+subroutine qr_algeq_solver(n, c, zr, zi, istatus, detil)
+
+    implicit none
+
+    integer, intent(in)   :: n !! degree of the monic polynomial.
+    real(pv), intent(in)  :: c(n + 1) !! coefficients of the polynomial. in order of decreasing powers.
+    real(pv), intent(out) :: zr(n) !! real part of output roots
+    real(pv), intent(out) :: zi(n) !! imaginary part of output roots
+    integer, intent(out)  :: istatus !! return code:
+                                    !!
+                                    !! * -1 : degree <= 0
+                                    !! * -2 : leading coefficient `c(1)` is zero
+                                    !! * 0 : success
+                                    !! * otherwise, the return code from `hqr_eigen_hessenberg`
+    real(pv), intent(out), optional :: detil !! accuracy hint.
+
+    real(pv), allocatable :: a(:, :) !! work matrix
+    integer, allocatable :: cnt(:) !! work area for counting the qr-iterations
+    integer :: i, iter
+    real(pv) :: afnorm
+
+    ! check for invalid arguments
+    if (n <= 0) then
+        istatus = -1
+        return
+    end if
+    if (c(1) == 0.0_pv) then
+        ! leading coefficient is zero.
+        istatus = -2
+        return
+    end if
+
+    allocate (a(n, n))
+    allocate (cnt(n))
+
+    ! build the companion matrix a.
+    call build_companion(n, a, c)
+
+    ! balancing the a itself.
+    call balance_companion(n, a)
+
+    ! qr iterations from a.
+    call hqr_eigen_hessenberg(n, a, zr, zi, cnt, istatus)
+    if (istatus /= 0) then
+        write (*, '(A,1X,I4)') 'abnormal return from hqr_eigen_hessenberg. istatus=', istatus
+        if (istatus == 1) write (*, '(A)') 'matrix is completely zero.'
+        if (istatus == 2) write (*, '(A)') 'qr iteration did not converge.'
+        if (istatus > 3) write (*, '(A)') 'arguments violate the condition.'
+        return
+    end if
+
+    if (present(detil)) then
+
+        ! compute the frobenius norm of the balanced companion matrix a.
+        afnorm = frobenius_norm_companion(n, a)
+
+        ! count the total qr iteration.
+        iter = 0
+        do i = 1, n
+            if (cnt(i) > 0) iter = iter + cnt(i)
+        end do
+
+        ! calculate the accuracy hint.
+        detil = eps*n*iter*afnorm
+
+    end if
+end subroutine qr_algeq_solver
+
+
+subroutine build_companion(n, a, c)
+
+    !!  build the companion matrix of the polynomial.
+    !!  (this was modified to allow for non-monic polynomials)
+
+    implicit none
+
+    integer, intent(in) :: n
+    real(pv), intent(out) :: a(n, n)
+    real(pv), intent(in) :: c(n + 1) !! coefficients in order of decreasing powers
+
+    integer :: i !! counter
+
+    ! create the companion matrix
+    a = 0.0_pv
+    do i = 1, n - 1
+        a(i + 1, i) = 1.0_pv
+    end do
+    do i = n, 1, -1
+        a(n - i + 1, n) = -c(i + 1)/c(1)
+    end do
+
+end subroutine build_companion
+
+subroutine balance_companion(n, a)
+
+    !!  blancing the unsymmetric matrix `a`.
+    !!
+    !!  this fortran code is based on the algol code "balance" from paper:
+    !!   "balancing a matrix for calculation of eigenvalues and eigenvectors"
+    !!   by b.n.parlett and c.reinsch, numer. math. 13, 293-304(1969).
+    !!
+    !!  note: the only non-zero elements of the companion matrix are touched.
+
+    implicit none
+
+    integer, intent(in) :: n
+    real(pv), intent(inout) :: a(n, n)
+
+    integer, parameter :: b = radix(1.0_pv) !! base of the floating point representation on the machine
+    integer, parameter :: b2 = b**2
+
+    integer :: i, j
+    real(pv) :: c, f, g, r, s
+    logical :: noconv
+
+    if (n <= 1) return ! do nothing
+
+    ! iteration:
+    main: do
+        noconv = .false.
+        do i = 1, n
+            ! touch only non-zero elements of companion.
+            if (i /= n) then
+                c = abs(a(i + 1, i))
+            else
+                c = 0.0_pv
+                do j = 1, n - 1
+                    c = c + abs(a(j, n))
+                end do
+            end if
+            if (i == 1) then
+                r = abs(a(1, n))
+            elseif (i /= n) then
+                r = abs(a(i, i - 1)) + abs(a(i, n))
+            else
+                r = abs(a(i, i - 1))
+            end if
+
+            if (c /= 0.0_pv .and. r /= 0.0_pv) then
+
+                g = r/b
+                f = 1.0_pv
+                s = c + r
+                do
+                    if (c >= g) exit
+                    f = f*b
+                    c = c*b2
+                end do
+                g = r*b
+                do
+                    if (c < g) exit
+                    f = f/b
+                    c = c/b2
+                end do
+                if ((c + r)/f < 0.95_pv*s) then
+                    g = 1.0_pv/f
+                    noconv = .true.
+                    ! touch only non-zero elements of companion.
+                    if (i == 1) then
+                        a(1, n) = a(1, n)*g
+                    else
+                        a(i, i - 1) = a(i, i - 1)*g
+                        a(i, n) = a(i, n)*g
+                    end if
+                    if (i /= n) then
+                        a(i + 1, i) = a(i + 1, i)*f
+                    else
+                        do j = 1, n
+                            a(j, i) = a(j, i)*f
+                        end do
+                    end if
+                end if
+            end if
+        end do
+        if (noconv) cycle main
+        exit main
+    end do main
+
+end subroutine balance_companion
+
+
+function frobenius_norm_companion(n, a) result(afnorm)
+
+    !!  calculate the frobenius norm of the companion-like matrix.
+    !!  note: the only non-zero elements of the companion matrix are touched.
+
+    implicit none
+
+    integer, intent(in) :: n
+    real(pv), intent(in) :: a(n, n)
+    real(pv) :: afnorm
+
+    integer :: i, j
+    real(pv) :: sum
+
+    sum = 0.0_pv
+    do j = 1, n - 1
+        sum = sum + a(j + 1, j)**2
+    end do
+    do i = 1, n
+        sum = sum + a(i, n)**2
+    end do
+    afnorm = sqrt(sum)
+
+end function frobenius_norm_companion
+
+
+subroutine hqr_eigen_hessenberg(n0, h, wr, wi, cnt, istatus)
+
+    !!  eigenvalue computation by the householder qr method
+    !!  for the real hessenberg matrix.
+    !!
+    !! this fortran code is based on the algol code "hqr" from the paper:
+    !!       "the qr algorithm for real hessenberg matrices"
+    !!       by r.s.martin, g.peters and j.h.wilkinson,
+    !!       numer. math. 14, 219-231(1970).
+    !!
+    !! comment: finds the eigenvalues of a real upper hessenberg matrix,
+    !!          h, stored in the array h(1:n0,1:n0), and stores the real
+    !!          parts in the array wr(1:n0) and the imaginary parts in the
+    !!          array wi(1:n0).
+    !!          the procedure fails if any eigenvalue takes more than
+    !!          `maxiter` iterations.
+
+    implicit none
+
+    integer, intent(in) :: n0
+    real(pv), intent(inout) :: h(n0, n0)
+    real(pv), intent(out) :: wr(n0)
+    real(pv), intent(out) :: wi(n0)
+    integer, intent(inout) :: cnt(n0)
+    integer, intent(out) :: istatus
+
+    integer :: i, j, k, l, m, na, its, n
+    real(pv) :: p, q, r, s, t, w, x, y, z
+    logical :: notlast, found
+
+    maxiter = 500 ! maximum number of iterations for the qr algorithm
+
+    ! note: n is changing in this subroutine.
+    n = n0
+    istatus = 0
+    t = 0.0_pv
+
+    main: do
+
+        if (n == 0) return
+
+        its = 0
+        na = n - 1
+
+        do
+
+            ! look for single small sub-diagonal element
+            found = .false.
+            do l = n, 2, -1
+                if (abs(h(l, l - 1)) <= eps*(abs(h(l - 1, l - 1)) + abs(h(l, l)))) then
+                    found = .true.
+                    exit
+                end if
+            end do
+            if (.not. found) l = 1
+
+            x = h(n, n)
+            if (l == n) then
+                ! one root found
+                wr(n) = x + t
+                wi(n) = 0.0_pv
+                cnt(n) = its
+                n = na
+                cycle main
+            else
+                y = h(na, na)
+                w = h(n, na)*h(na, n)
+                if (l == na) then
+                    ! comment: two roots found
+                    p = (y - x)/2
+                    q = p**2 + w
+                    y = sqrt(abs(q))
+                    cnt(n) = -its
+                    cnt(na) = its
+                    x = x + t
+                    if (q > 0.0_pv) then
+                        ! real pair
+                        if (p < 0.0_pv) y = -y
+                        y = p + y
+                        wr(na) = x + y
+                        wr(n) = x - w/y
+                        wi(na) = 0.0_pv
+                        wi(n) = 0.0_pv
+                    else
+                        ! complex pair
+                        wr(na) = x + p
+                        wr(n) = x + p
+                        wi(na) = y
+                        wi(n) = -y
+                    end if
+                    n = n - 2
+                    cycle main
+                else
+                    if (its == maxiter) then ! 30 for the original double precision code
+                        istatus = 1
+                        return
+                    end if
+                    if (its == 10 .or. its == 20) then
+                        ! form exceptional shift
+                        t = t + x
+                        do i = 1, n
+                            h(i, i) = h(i, i) - x
+                        end do
+                        s = abs(h(n, na)) + abs(h(na, n - 2))
+                        y = 0.75_pv*s
+                        x = y
+                        w = -0.4375_pv*s**2
+                    end if
+                    its = its + 1
+                    ! look for two consecutive small sub-diagonal elements
+                    do m = n - 2, l, -1
+                        z = h(m, m)
+                        r = x - z
+                        s = y - z
+                        p = (r*s - w)/h(m + 1, m) + h(m, m + 1)
+                        q = h(m + 1, m + 1) - z - r - s
+                        r = h(m + 2, m + 1)
+                        s = abs(p) + abs(q) + abs(r)
+                        p = p/s
+                        q = q/s
+                        r = r/s
+                        if (m == l) exit
+                        if (abs(h(m, m - 1))*(abs(q) + abs(r)) <= eps*abs(p) &
+                            *(abs(h(m - 1, m - 1)) + abs(z) + abs(h(m + 1, m + 1)))) exit
+                    end do
+
+                    do i = m + 2, n
+                        h(i, i - 2) = 0.0_pv
+                    end do
+                    do i = m + 3, n
+                        h(i, i - 3) = 0.0_pv
+                    end do
+                    ! double qr step involving rows l to n and columns m to n
+                    do k = m, na
+                        notlast = (k /= na)
+                        if (k /= m) then
+                            p = h(k, k - 1)
+                            q = h(k + 1, k - 1)
+                            if (notlast) then
+                                r = h(k + 2, k - 1)
+                            else
+                                r = 0.0_pv
+                            end if
+                            x = abs(p) + abs(q) + abs(r)
+                            if (x == 0.0_pv) cycle
+                            p = p/x
+                            q = q/x
+                            r = r/x
+                        end if
+                        s = sqrt(p**2 + q**2 + r**2)
+                        if (p < 0.0_pv) s = -s
+                        if (k /= m) then
+                            h(k, k - 1) = -s*x
+                        elseif (l /= m) then
+                            h(k, k - 1) = -h(k, k - 1)
+                        end if
+                        p = p + s
+                        x = p/s
+                        y = q/s
+                        z = r/s
+                        q = q/p
+                        r = r/p
+                        ! row modification
+                        do j = k, n
+                            p = h(k, j) + q*h(k + 1, j)
+                            if (notlast) then
+                                p = p + r*h(k + 2, j)
+                                h(k + 2, j) = h(k + 2, j) - p*z
+                            end if
+                            h(k + 1, j) = h(k + 1, j) - p*y
+                            h(k, j) = h(k, j) - p*x
+                        end do
+                        if (k + 3 < n) then
+                            j = k + 3
+                        else
+                            j = n
+                        end if
+                        ! column modification;
+                        do i = l, j
+                            p = x*h(i, k) + y*h(i, k + 1)
+                            if (notlast) then
+                                p = p + z*h(i, k + 2)
+                                h(i, k + 2) = h(i, k + 2) - p*r
+                            end if
+                            h(i, k + 1) = h(i, k + 1) - p*q
+                            h(i, k) = h(i, k) - p
+                        end do
+                    end do
+                    cycle
+                end if
+            end if
+
+        end do
+
+    end do main
+
+end subroutine hqr_eigen_hessenberg
   
+!-----------------------------------------------------------------------------------------------
 end module MOD_Roots

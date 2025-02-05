@@ -1,0 +1,23 @@
+{
+  // Use a supported compiler name instead of "true"
+  "fortran.linter.compiler": "gfortran",
+
+  // Set the path to the Fortran linter (fortls) executable
+  "fortran.linterExecutablePath": "C:\\Users\\brdu8458\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python311\\Scripts\\fortls.exe",
+
+  // If your fortls version supports these arguments, keep them; otherwise, consider removing or modifying them.
+  "fortran.linterArgs": ["--lint", "--format", "json"],
+  "fortran.linterFormat": "json",
+
+  // For fortls language server configuration
+  "fortran.fortls.disabled": false,
+  "fortran.fortls.configure": "C:\\Users\\brdu8458\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.11_qbz5nfra8p0\\LocalCache\\local-packages\\Python311\\Scripts\\",
+  "fortran.fortls.path": "C:\\Users\\brdu8458\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.11_qbz5nfra8p0\\LocalCache\\local-packages\\Python311\\Scripts\\fortls.exe",
+  "fortran.linter.compilerPath": "C:\\Users\\brdu8458\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.11_qbz5nfra8p0\\LocalCache\\local-packages\\Python311\\Scripts\\fortls.exe",
+
+  // Editor settings
+  "editor.rulers": [132],
+  "workbench.colorCustomizations": {
+    "editorRuler.foreground": "#458cff"
+  }
+}
