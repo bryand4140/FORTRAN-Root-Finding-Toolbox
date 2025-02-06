@@ -60,7 +60,7 @@ subroutine fun_zero(f_pointer, bounds, status, root, niter, f0_options)
     real(pv) :: a_local, b_local, c_local, d, e
     real(pv) :: fa, fb, fc, s, m, tol_act, tol_local
     integer :: iter, maxit_local
-    real(pv), parameter :: eps = 2.2204460492503131e-16
+    real(pv), parameter :: eps = 1.0e-8_pv
     ! Temporary variables for swapping.
     real(pv) :: temp, temp_val
 
@@ -282,558 +282,702 @@ subroutine init_fun_zero_options(f0_options)
 end subroutine init_fun_zero_options
 
 
-SUBROUTINE QR_Decomposition(A, Q, R, n, status)
-    !General Description: This subroutine performs a QR decomposition of a matrix A
-    !                     using the Gram-Schmidt process. The QR decomposition is
-    !                     a factorization of a matrix A into a product A = QR of an
-    !                     orthogonal matrix Q and an upper triangular matrix R.
-    !                     The QR decomposition is often used to solve the linear
-    !                     least squares problem, and is the basis for a particular
-    !                     eigenvalue algorithm.
-
-    !Input Parameters:
-    IMPLICIT NONE
-    INTEGER, INTENT(IN) :: n ! Size of the matrix A
-    REAL(pv), DIMENSION(n,n), INTENT(IN) :: A ! Matrix to be decomposed
-    REAL(pv), DIMENSION(n,n), INTENT(OUT) :: Q, R ! Q and R matrices
-
-    !Local Variables:
-    REAL(pv), DIMENSION(n) :: u, e ! Temporary vectors
-    INTEGER :: i, j ! Loop indices
-    INTEGER, INTENT(OUT) :: status ! Status of the decomposition
-
-    ! Initialize status to success
-    status = 0
-
-    ! Perform Error Checking
-    IF (SIZE(A,1) /= SIZE(A,2)) THEN
-        PRINT*, "ERROR: Matrix A must be square"
-        status = 1 ! Indicate error
-        RETURN
-    END IF
-
-    DO i = 1, n
-        u = A(:,i)
-        DO j = 1, i-1
-            R(j,i) = DOT_PRODUCT(Q(:,j), A(:,i))
-            u = u - R(j,i) * Q(:,j)
-        END DO
-        IF (NORM2(u) == 0.0_pv) THEN
-            PRINT*, "Error: Matrix is singular or nearly singular"
-            status = 2 ! Indicate error
-            RETURN
-        END IF
-        R(i,i) = NORM2(u)
-        e = u / R(i,i)
-        Q(:,i) = e
-    END DO
-END SUBROUTINE QR_Decomposition
-
-
-subroutine poly_roots(coeff, deg, roots, status)
+subroutine poly_roots(degree, coeffs, roots, status_flag, accuracy_hint)
+    !********************************************************************
+    ! General Description:
+    !   Solves a monic algebraic equation (i.e., finds the roots of a polynomial)
+    !   by constructing its companion matrix and computing its eigenvalues using
+    !   the Householder QR algorithm.
+    !
+    !   The polynomial is defined as:
+    !      coeffs(1)*x^(degree) + coeffs(2)*x^(degree-1) + ... + coeffs(degree)*x + coeffs(degree+1)
+    !
     ! Inputs:
-    !   coeff  - Real array of polynomial coefficients
-    !            (e.g., coeff(0) = constant term, coeff(deg) = leading coefficient)
-    !   deg    - Degree of the polynomial (deg >= 1)
+    !   degree      - An integer representing the degree of the monic polynomial.
+    !   coeffs      - A real array of length (degree + 1) containing the polynomial
+    !                 coefficients in order of decreasing powers. Note that coeffs(1)
+    !                 must be nonzero.
+    !
     ! Outputs:
-    !   roots  - Complex array of roots (length = deg)
-    !   status - Status flag: 0 if successful, nonzero otherwise.
-
+    !   roots       - A vector of length (degree) containing the computed roots of the polynomial.
+    !   status_flag - An integer return code indicating:
+    !                   - -1: Invalid polynomial degree (<= 0)
+    !                   - -2: Leading coefficient (coeffs(1)) is zero
+    !                   -  0: Success
+    !                   - >0: Error code returned from the QR eigenvalue solver.
+    !
+    ! Optional Outputs:
+    !   accuracy_hint - A real value providing an accuracy estimate based on machine
+    !                   precision, the degree of the polynomial, the total number of
+    !                   QR iterations, and the Frobenius norm of the balanced companion
+    !                   matrix.
+    !
+    ! Notes:
+    !   This subroutine uses several helper routines:
+    !     - build_companion_matrix: Constructs the companion matrix from the polynomial.
+    !     - balance_companion: Balances the companion matrix to improve numerical stability.
+    !     - hqr_eigen_hessenberg: Computes the eigenvalues of a Hessenberg matrix.
+    !     - frobenius_norm_companion: Computes the Frobenius norm of the companion matrix.
+    !********************************************************************
     implicit none
-    integer, intent(in)      :: deg
-    real(pv), intent(in)     :: coeff(0:deg)
-    complex(pv), intent(out) :: roots(deg)
-    integer, intent(out)     :: status
 
-    ! Local variables.
-    integer :: i, j, maxiter, iter, n
-    real(pv) :: tol
-    real(pv), allocatable :: comp_mat(:,:)
-    real(pv), allocatable :: Q(:,:), R(:,:)
-    integer :: qr_status
-    real(pv) :: offdiag_norm
+    ! Input arguments:
+    integer, intent(in) :: degree
+    real(pv), intent(in) :: coeffs(degree + 1)
 
-    ! Parameters for convergence.
-    tol = 1.0e-8_pv
-    maxiter = 1000
-    n = deg  ! The companion matrix is of size n x n
+    ! Output arguments:
+    Complex(pv), intent(out) :: roots(degree)  ! Roots of the polynomial.
+    integer, intent(out) :: status_flag        ! Return code (see header for details).
 
-    ! Allocate the companion matrix and Q, R matrices.
-    allocate(comp_mat(n, n))
-    allocate(Q(n, n))
-    allocate(R(n, n))
+    ! Optional output:
+    real(pv), intent(out), optional :: accuracy_hint   ! Accuracy estimate (if requested).
 
-    ! Form the companion matrix.
-    ! First, normalize coefficients (make polynomial monic)
-    if (abs(coeff(deg)) < tol) then
-       status = 1
-       print*, "Error: Leading coefficient is zero."
-       return
+    ! Machine parameters:
+    real(pv), parameter :: eps = 1.0e-8_pv
+
+    ! Local working arrays:
+    real(pv), allocatable :: companion_matrix(:,:)  ! Companion matrix (degree x degree)
+    integer, allocatable  :: iteration_counts(:)    ! QR iteration counts for each eigenvalue.
+
+    ! Local variables:
+    integer :: i, total_iterations
+    real(pv) :: frob_norm   ! Frobenius norm of the balanced companion matrix.
+    real(pv) :: roots_real(degree), roots_imag(degree)  ! Real and imaginary parts of the roots.
+
+    !--------------------------------------------------------------------
+    ! Check for invalid input arguments.
+    !--------------------------------------------------------------------
+    if (degree <= 0) then
+        status_flag = 1
+        return
+    end if
+    if (coeffs(1) == 0.0_pv) then
+        ! Leading coefficient is zero: cannot form a proper monic polynomial.
+        status_flag = 2
+        return
     end if
 
-    ! Set the companion matrix to zero.
-    comp_mat = 0.0_pv
+    !--------------------------------------------------------------------
+    ! Allocate workspace arrays.
+    !--------------------------------------------------------------------
+    allocate(companion_matrix(degree, degree))
+    allocate(iteration_counts(degree))
 
-    ! Fill in the subdiagonal with ones.
-    do i = 1, n-1
-       comp_mat(i+1, i) = 1.0_pv
-    end do
+    !--------------------------------------------------------------------
+    ! Build the companion matrix for the given polynomial.
+    !--------------------------------------------------------------------
+    call build_companion_matrix(degree, companion_matrix, coeffs)
 
-    ! Fill in the first row: negative of normalized coefficients.
-    ! Note: if we assume coeff(0) is the constant term and coeff(deg) is the leading coefficient,
-    ! then the first row becomes: -coeff(deg-1:0)/coeff(deg)
-    do j = 1, n
-       comp_mat(1, j) = -coeff(j-1) / coeff(deg)
-    end do
+    !--------------------------------------------------------------------
+    ! Balance the companion matrix to improve numerical stability.
+    !--------------------------------------------------------------------
+    call balance_companion(degree, companion_matrix)
 
-    ! QR Iteration loop.
-    iter = 0
-    do while (iter < maxiter)
-       iter = iter + 1
-
-       ! Call your QR decomposition subroutine.
-       call QR_Decomposition(comp_mat, Q, R, n, qr_status)
-       if (qr_status /= 0) then
-          status = 2
-          print*, "Error in QR decomposition."
-          return
-       end if
-
-       ! Update comp_mat = R * Q.
-       comp_mat = matmul(R, Q)
-
-       ! Check for convergence.
-       ! For a nearly upper triangular matrix, the subdiagonal entries should be small.
-       offdiag_norm = 0.0_pv
-       do i = 2, n
-          offdiag_norm = offdiag_norm + abs(comp_mat(i, i-1))**2
-       end do
-       offdiag_norm = sqrt(offdiag_norm)
-       if (offdiag_norm < tol) exit
-    end do
-
-    if (iter >= maxiter) then
-       status = 3
-       print*, "QR iteration did not converge."
+    !--------------------------------------------------------------------
+    ! Compute the eigenvalues of the balanced companion matrix using the
+    ! Householder QR algorithm. The real parts are stored in roots_real and
+    ! the imaginary parts in roots_imag.
+    ! The iteration_counts array stores the number of iterations taken for each root.
+    !--------------------------------------------------------------------
+    call hqr_eigen_hessenberg(degree, companion_matrix, roots_real, roots_imag, iteration_counts, status_flag)
+    if (status_flag /= 0) then
+        write(*, '(A,1X,I4)') 'Abnormal return from hqr_eigen_hessenberg. status_flag = ', status_flag
+        if (status_flag == 1) write(*, '(A)') 'Matrix is completely zero.'
+        if (status_flag == 2) write(*, '(A)') 'QR iteration did not converge.'
+        if (status_flag > 3)  write(*, '(A)') 'Arguments violate the condition.'
+        return
     else
-       status = 0
+        !Put the results into the Roots array.
+        do i = 1, degree
+            roots(i) = cmplx(roots_real(i), roots_imag(i), kind=pv)
+        end do
     end if
 
-    ! Extract the eigenvalues from the (nearly) upper triangular matrix.
-    do i = 1, n
-       ! This simple version ignores the possibility of 2x2 blocks for complex pairs.
-       roots(i) = cmplx(comp_mat(i,i), 0.0_pv, kind=pv)
-    end do
 
-    ! Deallocate local arrays.
-    deallocate(comp_mat, Q, R)
+
+    !--------------------------------------------------------------------
+    ! If an accuracy hint is requested, compute it.
+    !   The hint is based on the machine precision (eps), the degree of the
+    !   polynomial, the total number of QR iterations, and the Frobenius norm of
+    !   the balanced companion matrix.
+    !--------------------------------------------------------------------
+    if (present(accuracy_hint)) then
+        ! Compute the Frobenius norm of the balanced companion matrix.
+        frob_norm = frobenius_norm_companion(degree, companion_matrix)
+
+        ! Sum the total number of QR iterations.
+        total_iterations = 0
+        do i = 1, degree
+            if (iteration_counts(i) > 0) then
+                total_iterations = total_iterations + iteration_counts(i)
+            end if
+        end do
+
+        ! Calculate the accuracy hint.
+        accuracy_hint = eps * degree * total_iterations * frob_norm
+    end if
+
 end subroutine poly_roots
 
 
-subroutine qr_algeq_solver(n, c, zr, zi, istatus, detil)
-
+subroutine build_companion_matrix(poly_degree, companion_matrix, coeffs)
+    !********************************************************************
+    ! General Description:
+    !   Constructs the companion matrix for a polynomial. The eigenvalues
+    !   of this companion matrix are the roots of the polynomial.
+    !
+    !   The polynomial is represented in the following form:
+    !     P(x) = coeffs(1)*x^(poly_degree) + coeffs(2)*x^(poly_degree-1) + 
+    !            ... + coeffs(poly_degree)*x + coeffs(poly_degree+1)
+    !
+    !   Note: The polynomial does not need to be monic. The companion matrix
+    !         is built using normalized coefficients (dividing by coeffs(1)).
+    !
+    ! Inputs:
+    !   poly_degree       - An integer representing the degree of the polynomial.
+    !   coeffs            - A real array of length poly_degree+1 containing the
+    !                       polynomial coefficients in decreasing order of power.
+    !
+    ! Outputs:
+    !   companion_matrix  - A real matrix of dimensions (poly_degree, poly_degree)
+    !                       that is the companion matrix of the polynomial.
+    !********************************************************************
     implicit none
 
-    integer, intent(in)   :: n !! degree of the monic polynomial.
-    real(pv), intent(in)  :: c(n + 1) !! coefficients of the polynomial. in order of decreasing powers.
-    real(pv), intent(out) :: zr(n) !! real part of output roots
-    real(pv), intent(out) :: zi(n) !! imaginary part of output roots
-    integer, intent(out)  :: istatus !! return code:
-                                    !!
-                                    !! * -1 : degree <= 0
-                                    !! * -2 : leading coefficient `c(1)` is zero
-                                    !! * 0 : success
-                                    !! * otherwise, the return code from `hqr_eigen_hessenberg`
-    real(pv), intent(out), optional :: detil !! accuracy hint.
+    integer, intent(in) :: poly_degree
+    real(pv), intent(in) :: coeffs(poly_degree + 1)   ! Polynomial coefficients: highest to lowest degree.
+    real(pv), intent(out) :: companion_matrix(poly_degree, poly_degree)
 
-    real(pv), allocatable :: a(:, :) !! work matrix
-    integer, allocatable :: cnt(:) !! work area for counting the qr-iterations
-    integer :: i, iter
-    real(pv) :: afnorm
+    integer :: i   ! Loop counter
 
-    ! check for invalid arguments
-    if (n <= 0) then
-        istatus = -1
-        return
-    end if
-    if (c(1) == 0.0_pv) then
-        ! leading coefficient is zero.
-        istatus = -2
-        return
-    end if
+    !--------------------------------------------------------------------
+    ! Initialize the companion matrix to all zeros.
+    !--------------------------------------------------------------------
+    companion_matrix = 0.0_pv
 
-    allocate (a(n, n))
-    allocate (cnt(n))
-
-    ! build the companion matrix a.
-    call build_companion(n, a, c)
-
-    ! balancing the a itself.
-    call balance_companion(n, a)
-
-    ! qr iterations from a.
-    call hqr_eigen_hessenberg(n, a, zr, zi, cnt, istatus)
-    if (istatus /= 0) then
-        write (*, '(A,1X,I4)') 'abnormal return from hqr_eigen_hessenberg. istatus=', istatus
-        if (istatus == 1) write (*, '(A)') 'matrix is completely zero.'
-        if (istatus == 2) write (*, '(A)') 'qr iteration did not converge.'
-        if (istatus > 3) write (*, '(A)') 'arguments violate the condition.'
-        return
-    end if
-
-    if (present(detil)) then
-
-        ! compute the frobenius norm of the balanced companion matrix a.
-        afnorm = frobenius_norm_companion(n, a)
-
-        ! count the total qr iteration.
-        iter = 0
-        do i = 1, n
-            if (cnt(i) > 0) iter = iter + cnt(i)
-        end do
-
-        ! calculate the accuracy hint.
-        detil = eps*n*iter*afnorm
-
-    end if
-end subroutine qr_algeq_solver
-
-
-subroutine build_companion(n, a, c)
-
-    !!  build the companion matrix of the polynomial.
-    !!  (this was modified to allow for non-monic polynomials)
-
-    implicit none
-
-    integer, intent(in) :: n
-    real(pv), intent(out) :: a(n, n)
-    real(pv), intent(in) :: c(n + 1) !! coefficients in order of decreasing powers
-
-    integer :: i !! counter
-
-    ! create the companion matrix
-    a = 0.0_pv
-    do i = 1, n - 1
-        a(i + 1, i) = 1.0_pv
-    end do
-    do i = n, 1, -1
-        a(n - i + 1, n) = -c(i + 1)/c(1)
+    !--------------------------------------------------------------------
+    ! Fill the subdiagonal with ones.
+    ! The subdiagonal (just below the main diagonal) helps shift the basis
+    ! so that the matrix's characteristic polynomial matches the input polynomial.
+    !--------------------------------------------------------------------
+    do i = 1, poly_degree - 1
+        companion_matrix(i + 1, i) = 1.0_pv
     end do
 
-end subroutine build_companion
+    !--------------------------------------------------------------------
+    ! Fill the last column with the normalized negative coefficients.
+    ! The coefficients (except for the leading coefficient) are inserted in
+    ! reverse order:
+    !   - For i = poly_degree, companion_matrix(1, poly_degree) = -coeffs(poly_degree+1)/coeffs(1)
+    !   - For i = poly_degree-1, companion_matrix(2, poly_degree) = -coeffs(poly_degree)/coeffs(1)
+    !   - ...
+    !   - For i = 1, companion_matrix(poly_degree, poly_degree) = -coeffs(2)/coeffs(1)
+    !
+    ! This arrangement ensures that the companion matrix accurately represents the
+    ! characteristic polynomial of the original polynomial.
+    !--------------------------------------------------------------------
+    do i = poly_degree, 1, -1
+        companion_matrix(poly_degree - i + 1, poly_degree) = -coeffs(i + 1) / coeffs(1)
+    end do
 
-subroutine balance_companion(n, a)
+end subroutine build_companion_matrix
 
-    !!  blancing the unsymmetric matrix `a`.
-    !!
-    !!  this fortran code is based on the algol code "balance" from paper:
-    !!   "balancing a matrix for calculation of eigenvalues and eigenvectors"
-    !!   by b.n.parlett and c.reinsch, numer. math. 13, 293-304(1969).
-    !!
-    !!  note: the only non-zero elements of the companion matrix are touched.
 
+subroutine balance_companion(matrix_dim, comp_matrix)
+    !********************************************************************
+    ! General Description:
+    !   Balances an unsymmetric companion matrix by scaling selected rows
+    !   and columns. This helps improve the accuracy and stability of
+    !   eigenvalue and eigenvector computations.
+    !
+    !   This Fortran code is adapted from the Algol code "balance" in the
+    !   paper:
+    !       "Balancing a Matrix for the Calculation of Eigenvalues and
+    !        Eigenvectors"
+    !   by B.N. Parlett and C. Reinsch, Numerische Mathematik, 13, 293-304 (1969).
+    !
+    !   Note: Only the nonzero elements of the companion matrix are modified.
+    !
+    ! Inputs:
+    !   matrix_dim  - Integer representing the dimension of the square matrix.
+    !
+    ! In/Out:
+    !   comp_matrix - A real matrix of dimensions (matrix_dim, matrix_dim)
+    !                 containing the companion matrix. This matrix is modified
+    !                 in-place to achieve a balanced form.
+    !********************************************************************
     implicit none
 
-    integer, intent(in) :: n
-    real(pv), intent(inout) :: a(n, n)
+    ! Input/Output variables:
+    integer, intent(in) :: matrix_dim
+    real(pv), intent(inout) :: comp_matrix(matrix_dim, matrix_dim)
 
-    integer, parameter :: b = radix(1.0_pv) !! base of the floating point representation on the machine
-    integer, parameter :: b2 = b**2
+    ! Machine parameters:
+    integer, parameter :: base = radix(1.0_pv)    ! Base (radix) of the floating-point system.
+    integer, parameter :: base_squared = base**2  ! Square of the base.
 
+    ! Local variables:
     integer :: i, j
-    real(pv) :: c, f, g, r, s
-    logical :: noconv
+    real(pv) :: colMagnitude      ! Magnitude from "column" nonzero elements.
+    real(pv) :: rowMagnitude      ! Magnitude from "row" nonzero elements.
+    real(pv) :: scalingFactor     ! Factor by which the matrix is scaled.
+    real(pv) :: reciprocalScaling ! Reciprocal of scalingFactor.
+    real(pv) :: totalMagnitude    ! Sum of rowMagnitude and colMagnitude.
+    logical :: scaling_applied    ! Flag indicating if any scaling was done in an iteration.
 
-    if (n <= 1) return ! do nothing
+    ! If the matrix is 1x1 or smaller, no balancing is needed.
+    if (matrix_dim <= 1) return
 
-    ! iteration:
-    main: do
-        noconv = .false.
-        do i = 1, n
-            ! touch only non-zero elements of companion.
-            if (i /= n) then
-                c = abs(a(i + 1, i))
+    ! Begin the iterative balancing process.
+    do  ! Main iteration loop.
+        scaling_applied = .false.
+
+        ! Loop over each index (corresponding to a row/column) in the matrix.
+        do i = 1, matrix_dim
+
+            !-------------------------------------------------------------
+            ! Compute the "column magnitude" (colMagnitude) for the current index.
+            ! For rows 1 to matrix_dim-1, the only nonzero element is the
+            ! subdiagonal element at (i+1, i). For the last row (i = matrix_dim),
+            ! the nonzero elements lie in the last column (rows 1 to matrix_dim-1).
+            !-------------------------------------------------------------
+            if (i /= matrix_dim) then
+                colMagnitude = abs(comp_matrix(i + 1, i))
             else
-                c = 0.0_pv
-                do j = 1, n - 1
-                    c = c + abs(a(j, n))
+                colMagnitude = 0.0_pv
+                do j = 1, matrix_dim - 1
+                    colMagnitude = colMagnitude + abs(comp_matrix(j, matrix_dim))
                 end do
             end if
+
+            !-------------------------------------------------------------
+            ! Compute the "row magnitude" (rowMagnitude) for the current index.
+            ! For the first row, the nonzero element is in the last column.
+            ! For rows 2 to matrix_dim-1, the nonzero elements are the one
+            ! immediately to the left (subdiagonal) and the one in the last column.
+            ! For the last row, the only nonzero element is immediately to the left.
+            !-------------------------------------------------------------
             if (i == 1) then
-                r = abs(a(1, n))
-            elseif (i /= n) then
-                r = abs(a(i, i - 1)) + abs(a(i, n))
+                rowMagnitude = abs(comp_matrix(1, matrix_dim))
+            elseif (i /= matrix_dim) then
+                rowMagnitude = abs(comp_matrix(i, i - 1)) + abs(comp_matrix(i, matrix_dim))
             else
-                r = abs(a(i, i - 1))
+                rowMagnitude = abs(comp_matrix(matrix_dim, matrix_dim - 1))
             end if
 
-            if (c /= 0.0_pv .and. r /= 0.0_pv) then
+            ! Only proceed if both magnitudes are nonzero.
+            if (colMagnitude /= 0.0_pv .and. rowMagnitude /= 0.0_pv) then
 
-                g = r/b
-                f = 1.0_pv
-                s = c + r
+                !-------------------------------------------------------------
+                ! Determine an appropriate scaling factor to balance the row and
+                ! column magnitudes.
+                !
+                ! Initialize scalingFactor to 1.0 and record the original total
+                ! magnitude.
+                !-------------------------------------------------------------
+                scalingFactor = 1.0_pv
+                totalMagnitude = colMagnitude + rowMagnitude
+
+                ! Increase scalingFactor until the column magnitude is no longer too small.
                 do
-                    if (c >= g) exit
-                    f = f*b
-                    c = c*b2
+                    if (colMagnitude >= rowMagnitude / base) exit
+                    scalingFactor = scalingFactor * base
+                    colMagnitude = colMagnitude * base_squared
                 end do
-                g = r*b
+
+                ! Decrease scalingFactor until the column magnitude is no longer too large.
                 do
-                    if (c < g) exit
-                    f = f/b
-                    c = c/b2
+                    if (colMagnitude < rowMagnitude * base) exit
+                    scalingFactor = scalingFactor / base
+                    colMagnitude = colMagnitude / base_squared
                 end do
-                if ((c + r)/f < 0.95_pv*s) then
-                    g = 1.0_pv/f
-                    noconv = .true.
-                    ! touch only non-zero elements of companion.
+
+                !-------------------------------------------------------------
+                ! Check if the scaling improves the balance by more than 5%.
+                ! If so, apply the scaling. The test compares the scaled sum
+                ! of magnitudes with 0.95 times the original total magnitude.
+                !-------------------------------------------------------------
+                if ((colMagnitude + rowMagnitude) / scalingFactor < 0.95_pv * totalMagnitude) then
+                    reciprocalScaling = 1.0_pv / scalingFactor
+                    scaling_applied = .true.
+
+                    ! Scale the nonzero elements in the current row:
+                    ! For the first row, only the last column element is scaled.
+                    ! For subsequent rows, scale the subdiagonal element (left) and
+                    ! the element in the last column.
                     if (i == 1) then
-                        a(1, n) = a(1, n)*g
+                        comp_matrix(1, matrix_dim) = comp_matrix(1, matrix_dim) * reciprocalScaling
                     else
-                        a(i, i - 1) = a(i, i - 1)*g
-                        a(i, n) = a(i, n)*g
+                        comp_matrix(i, i - 1) = comp_matrix(i, i - 1) * reciprocalScaling
+                        comp_matrix(i, matrix_dim) = comp_matrix(i, matrix_dim) * reciprocalScaling
                     end if
-                    if (i /= n) then
-                        a(i + 1, i) = a(i + 1, i)*f
+
+                    ! Scale the nonzero elements in the corresponding column:
+                    ! For rows other than the last, scale the subdiagonal element below.
+                    ! For the last row, scale every element in column i.
+                    if (i /= matrix_dim) then
+                        comp_matrix(i + 1, i) = comp_matrix(i + 1, i) * scalingFactor
                     else
-                        do j = 1, n
-                            a(j, i) = a(j, i)*f
+                        do j = 1, matrix_dim
+                            comp_matrix(j, i) = comp_matrix(j, i) * scalingFactor
                         end do
                     end if
                 end if
             end if
-        end do
-        if (noconv) cycle main
-        exit main
-    end do main
+        end do  ! End loop over i.
+
+        ! If any scaling was applied in this iteration, repeat the process.
+        if (scaling_applied) cycle
+        exit  ! Exit the main loop when no further scaling is needed.
+    end do  ! End of the main iteration loop.
 
 end subroutine balance_companion
 
 
-function frobenius_norm_companion(n, a) result(afnorm)
-
-    !!  calculate the frobenius norm of the companion-like matrix.
-    !!  note: the only non-zero elements of the companion matrix are touched.
-
+function frobenius_norm_companion(matrix_dim, comp_matrix) result(frobenius_norm)
+    !********************************************************************
+    ! General Description:
+    !   Computes the Frobenius norm of a companion-like matrix.
+    !
+    !   The companion matrix is assumed to have nonzero entries only in:
+    !     - The subdiagonal positions (i.e., element (j+1, j) for j = 1 to matrix_dim-1)
+    !     - The last column (i.e., element (i, matrix_dim) for i = 1 to matrix_dim)
+    !
+    !   The Frobenius norm is defined as:
+    !       ||A||_F = sqrt( sum_i sum_j (A(i,j)**2) )
+    !
+    !   Since only the nonzero entries are stored in the above locations,
+    !   we only sum their squares.
+    !
+    ! Inputs:
+    !   matrix_dim    - Integer representing the dimension (order) of the matrix.
+    !   comp_matrix   - Real matrix of size (matrix_dim, matrix_dim) that represents
+    !                   the companion matrix.
+    !
+    ! Output:
+    !   frobenius_norm - The computed Frobenius norm of the companion matrix.
+    !********************************************************************
     implicit none
 
-    integer, intent(in) :: n
-    real(pv), intent(in) :: a(n, n)
-    real(pv) :: afnorm
+    ! Input arguments:
+    integer, intent(in) :: matrix_dim
+    real(pv), intent(in) :: comp_matrix(matrix_dim, matrix_dim)
 
+    ! Function result:
+    real(pv) :: frobenius_norm
+
+    ! Local variables:
     integer :: i, j
-    real(pv) :: sum
+    real(pv) :: sumSquares   ! Accumulator for the sum of squares
 
-    sum = 0.0_pv
-    do j = 1, n - 1
-        sum = sum + a(j + 1, j)**2
+    ! Initialize the sum of squares to zero.
+    sumSquares = 0.0_pv
+
+    !--------------------------------------------------------------------
+    ! Sum the squares of the subdiagonal elements.
+    ! These are located at positions (j+1, j) for j = 1 to matrix_dim-1.
+    !--------------------------------------------------------------------
+    do j = 1, matrix_dim - 1
+        sumSquares = sumSquares + comp_matrix(j + 1, j)**2
     end do
-    do i = 1, n
-        sum = sum + a(i, n)**2
+
+    !--------------------------------------------------------------------
+    ! Sum the squares of the elements in the last column.
+    ! These are located at positions (i, matrix_dim) for i = 1 to matrix_dim.
+    !--------------------------------------------------------------------
+    do i = 1, matrix_dim
+        sumSquares = sumSquares + comp_matrix(i, matrix_dim)**2
     end do
-    afnorm = sqrt(sum)
+
+    ! Compute the Frobenius norm as the square root of the total sum.
+    frobenius_norm = sqrt(sumSquares)
 
 end function frobenius_norm_companion
 
 
-subroutine hqr_eigen_hessenberg(n0, h, wr, wi, cnt, istatus)
-
-    !!  eigenvalue computation by the householder qr method
-    !!  for the real hessenberg matrix.
-    !!
-    !! this fortran code is based on the algol code "hqr" from the paper:
-    !!       "the qr algorithm for real hessenberg matrices"
-    !!       by r.s.martin, g.peters and j.h.wilkinson,
-    !!       numer. math. 14, 219-231(1970).
-    !!
-    !! comment: finds the eigenvalues of a real upper hessenberg matrix,
-    !!          h, stored in the array h(1:n0,1:n0), and stores the real
-    !!          parts in the array wr(1:n0) and the imaginary parts in the
-    !!          array wi(1:n0).
-    !!          the procedure fails if any eigenvalue takes more than
-    !!          `maxiter` iterations.
-
+subroutine hqr_eigen_hessenberg(order, hessenberg, eigen_real, eigen_imag, iteration_count, status_flag)
+    !********************************************************************
+    ! General Description:
+    !   Computes the eigenvalues of a real upper Hessenberg matrix using the
+    !   Householder QR algorithm. This routine is adapted from the Algol code
+    !   "hqr" in the paper:
+    !
+    !       "The QR Algorithm for Real Hessenberg Matrices"
+    !       by R.S. Martin, G. Peters and J.H. Wilkinson,
+    !       Numer. Math. 14, 219-231 (1970).
+    !
+    !   The algorithm reduces the matrix and then finds its eigenvalues. The
+    !   real parts of the eigenvalues are stored in eigen_real and the imaginary
+    !   parts in eigen_imag. The routine also records (in iteration_count) the
+    !   number of iterations required for convergence for each eigenvalue.
+    !
+    ! Inputs:
+    !   order       - The order (dimension) of the Hessenberg matrix.
+    !   hessenberg  - A real matrix (order x order) in upper Hessenberg form.
+    !
+    ! In/Out:
+    !   iteration_count - An integer array of length order that records the number
+    !                     of iterations used for each eigenvalue.
+    !
+    ! Outputs:
+    !   eigen_real  - Array (length order) containing the real parts of the computed
+    !                 eigenvalues.
+    !   eigen_imag  - Array (length order) containing the imaginary parts of the computed
+    !                 eigenvalues.
+    !   status_flag - Integer flag: 0 indicates success; 1 indicates failure to converge.
+    !********************************************************************
     implicit none
 
-    integer, intent(in) :: n0
-    real(pv), intent(inout) :: h(n0, n0)
-    real(pv), intent(out) :: wr(n0)
-    real(pv), intent(out) :: wi(n0)
-    integer, intent(inout) :: cnt(n0)
-    integer, intent(out) :: istatus
+    ! Arguments:
+    integer, intent(in) :: order
+    real(pv), intent(inout) :: hessenberg(order, order)
+    real(pv), intent(out) :: eigen_real(order)
+    real(pv), intent(out) :: eigen_imag(order)
+    integer, intent(inout) :: iteration_count(order)
+    integer, intent(out) :: status_flag
 
-    integer :: i, j, k, l, m, na, its, n
-    real(pv) :: p, q, r, s, t, w, x, y, z
-    logical :: notlast, found
+    ! Local variables:
+    integer :: i, j, k, l, m
+    integer :: one_less_order, current_order, num_iterations
+    real(pv) :: eigen_approx        ! Approximation taken from the (current_order,current_order) diagonal.
+    real(pv) :: next_diag           ! hessenberg(one_less_order, one_less_order)
+    real(pv) :: offdiag_product     ! Product: hessenberg(current_order, one_less_order)*hessenberg(one_less_order, current_order)
+    real(pv) :: shift_accum         ! Accumulates shifts over iterations.
+    real(pv) :: subdiag_sum         ! Sum of magnitudes of selected subdiagonal elements.
+    real(pv) :: temp_p, temp_q, temp_r  ! Temporary variables for QR computations.
+    real(pv) :: temp_val, temp_shift    ! Temporary values used during exceptional shifts.
+    real(pv) :: x, y, z           ! Used in various computations (e.g., shift approximations)
+    real(pv) :: s                 ! --- NEW: used for computing a norm in the QR step.
+    logical :: small_subdiag_found, not_last
 
-    maxiter = 500 ! maximum number of iterations for the qr algorithm
+    ! Maximum iterations allowed per eigenvalue.
+    integer, parameter :: max_iterations = 500
+    real(pv), parameter :: eps = 1.0e-8_pv
 
-    ! note: n is changing in this subroutine.
-    n = n0
-    istatus = 0
-    t = 0.0_pv
+    ! Initialization.
+    current_order = order
+    status_flag = 0
+    shift_accum = 0.0_pv
 
-    main: do
+    main_loop: do
+        ! If the current submatrix is empty, all eigenvalues have been found.
+        if (current_order == 0) return
 
-        if (n == 0) return
+        num_iterations = 0
+        one_less_order = current_order - 1
 
-        its = 0
-        na = n - 1
-
-        do
-
-            ! look for single small sub-diagonal element
-            found = .false.
-            do l = n, 2, -1
-                if (abs(h(l, l - 1)) <= eps*(abs(h(l - 1, l - 1)) + abs(h(l, l)))) then
-                    found = .true.
-                    exit
-                end if
-            end do
-            if (.not. found) l = 1
-
-            x = h(n, n)
-            if (l == n) then
-                ! one root found
-                wr(n) = x + t
-                wi(n) = 0.0_pv
-                cnt(n) = its
-                n = na
-                cycle main
-            else
-                y = h(na, na)
-                w = h(n, na)*h(na, n)
-                if (l == na) then
-                    ! comment: two roots found
-                    p = (y - x)/2
-                    q = p**2 + w
-                    y = sqrt(abs(q))
-                    cnt(n) = -its
-                    cnt(na) = its
-                    x = x + t
-                    if (q > 0.0_pv) then
-                        ! real pair
-                        if (p < 0.0_pv) y = -y
-                        y = p + y
-                        wr(na) = x + y
-                        wr(n) = x - w/y
-                        wi(na) = 0.0_pv
-                        wi(n) = 0.0_pv
-                    else
-                        ! complex pair
-                        wr(na) = x + p
-                        wr(n) = x + p
-                        wi(na) = y
-                        wi(n) = -y
-                    end if
-                    n = n - 2
-                    cycle main
-                else
-                    if (its == maxiter) then ! 30 for the original double precision code
-                        istatus = 1
-                        return
-                    end if
-                    if (its == 10 .or. its == 20) then
-                        ! form exceptional shift
-                        t = t + x
-                        do i = 1, n
-                            h(i, i) = h(i, i) - x
-                        end do
-                        s = abs(h(n, na)) + abs(h(na, n - 2))
-                        y = 0.75_pv*s
-                        x = y
-                        w = -0.4375_pv*s**2
-                    end if
-                    its = its + 1
-                    ! look for two consecutive small sub-diagonal elements
-                    do m = n - 2, l, -1
-                        z = h(m, m)
-                        r = x - z
-                        s = y - z
-                        p = (r*s - w)/h(m + 1, m) + h(m, m + 1)
-                        q = h(m + 1, m + 1) - z - r - s
-                        r = h(m + 2, m + 1)
-                        s = abs(p) + abs(q) + abs(r)
-                        p = p/s
-                        q = q/s
-                        r = r/s
-                        if (m == l) exit
-                        if (abs(h(m, m - 1))*(abs(q) + abs(r)) <= eps*abs(p) &
-                            *(abs(h(m - 1, m - 1)) + abs(z) + abs(h(m + 1, m + 1)))) exit
-                    end do
-
-                    do i = m + 2, n
-                        h(i, i - 2) = 0.0_pv
-                    end do
-                    do i = m + 3, n
-                        h(i, i - 3) = 0.0_pv
-                    end do
-                    ! double qr step involving rows l to n and columns m to n
-                    do k = m, na
-                        notlast = (k /= na)
-                        if (k /= m) then
-                            p = h(k, k - 1)
-                            q = h(k + 1, k - 1)
-                            if (notlast) then
-                                r = h(k + 2, k - 1)
-                            else
-                                r = 0.0_pv
-                            end if
-                            x = abs(p) + abs(q) + abs(r)
-                            if (x == 0.0_pv) cycle
-                            p = p/x
-                            q = q/x
-                            r = r/x
-                        end if
-                        s = sqrt(p**2 + q**2 + r**2)
-                        if (p < 0.0_pv) s = -s
-                        if (k /= m) then
-                            h(k, k - 1) = -s*x
-                        elseif (l /= m) then
-                            h(k, k - 1) = -h(k, k - 1)
-                        end if
-                        p = p + s
-                        x = p/s
-                        y = q/s
-                        z = r/s
-                        q = q/p
-                        r = r/p
-                        ! row modification
-                        do j = k, n
-                            p = h(k, j) + q*h(k + 1, j)
-                            if (notlast) then
-                                p = p + r*h(k + 2, j)
-                                h(k + 2, j) = h(k + 2, j) - p*z
-                            end if
-                            h(k + 1, j) = h(k + 1, j) - p*y
-                            h(k, j) = h(k, j) - p*x
-                        end do
-                        if (k + 3 < n) then
-                            j = k + 3
-                        else
-                            j = n
-                        end if
-                        ! column modification;
-                        do i = l, j
-                            p = x*h(i, k) + y*h(i, k + 1)
-                            if (notlast) then
-                                p = p + z*h(i, k + 2)
-                                h(i, k + 2) = h(i, k + 2) - p*r
-                            end if
-                            h(i, k + 1) = h(i, k + 1) - p*q
-                            h(i, k) = h(i, k) - p
-                        end do
-                    end do
-                    cycle
-                end if
+        !--------------------------------------------------------------------
+        ! Search for a small subdiagonal element. We look for an index l (2<=l<=current_order)
+        ! such that the subdiagonal element hessenberg(l, l-1) is negligible relative to
+        ! the sum |hessenberg(l-1, l-1)| + |hessenberg(l, l)|.
+        !--------------------------------------------------------------------
+        small_subdiag_found = .false.
+        do l = current_order, 2, -1
+            if ( abs(hessenberg(l, l-1)) <= eps * ( abs(hessenberg(l-1, l-1)) + abs(hessenberg(l, l)) ) ) then
+                small_subdiag_found = .true.
+                exit
             end if
-
         end do
+        if (.not. small_subdiag_found) then
+            l = 1
+        end if
 
-    end do main
+        ! Set eigen_approx to the bottom-right diagonal element.
+        eigen_approx = hessenberg(current_order, current_order)
+
+        if (l == current_order) then
+            !----------------------------------------------------------------
+            ! A single eigenvalue has converged.
+            !----------------------------------------------------------------
+            eigen_real(current_order) = eigen_approx + shift_accum
+            eigen_imag(current_order) = 0.0_pv
+            iteration_count(current_order) = num_iterations
+            current_order = one_less_order
+            cycle main_loop
+        else
+            !----------------------------------------------------------------
+            ! If l == one_less_order, then a 2x2 block is isolated and yields
+            ! a pair of eigenvalues.
+            !----------------------------------------------------------------
+            next_diag = hessenberg(one_less_order, one_less_order)
+            offdiag_product = hessenberg(current_order, one_less_order) * &
+                              hessenberg(one_less_order, current_order)
+            if (l == one_less_order) then
+                ! Compute the eigenvalues from the 2x2 block.
+                temp_p = (next_diag - eigen_approx) / 2.0_pv
+                temp_q = temp_p**2 + offdiag_product
+                next_diag = sqrt( abs(temp_q) )
+                iteration_count(current_order) = -num_iterations
+                iteration_count(one_less_order) = num_iterations
+                eigen_approx = eigen_approx + shift_accum
+                if (temp_q > 0.0_pv) then
+                    !----------------------------------------------------------------
+                    ! Real eigenvalue pair.
+                    if (temp_p < 0.0_pv) then
+                        next_diag = -next_diag
+                    end if
+                    next_diag = temp_p + next_diag
+                    eigen_real(one_less_order) = eigen_approx + next_diag
+                    eigen_real(current_order) = eigen_approx - offdiag_product / next_diag
+                    eigen_imag(one_less_order) = 0.0_pv
+                    eigen_imag(current_order) = 0.0_pv
+                else
+                    !----------------------------------------------------------------
+                    ! Complex conjugate eigenvalue pair.
+                    eigen_real(one_less_order) = eigen_approx + temp_p
+                    eigen_real(current_order) = eigen_approx + temp_p
+                    eigen_imag(one_less_order) = next_diag
+                    eigen_imag(current_order) = -next_diag
+                end if
+                current_order = current_order - 2
+                cycle main_loop
+            else
+                !----------------------------------------------------------------
+                ! No eigenvalue has converged yet.
+                ! If we have reached the maximum number of iterations, then the
+                ! algorithm fails.
+                !----------------------------------------------------------------
+                if (num_iterations == max_iterations) then
+                    status_flag = 1
+                    return
+                end if
+
+                !----------------------------------------------------------------
+                ! Exceptional shift: after 10 or 20 iterations, modify the shift.
+                !----------------------------------------------------------------
+                if (num_iterations == 10 .or. num_iterations == 20) then
+                    shift_accum = shift_accum + eigen_approx
+                    do i = 1, current_order
+                        hessenberg(i, i) = hessenberg(i, i) - eigen_approx
+                    end do
+                    subdiag_sum = abs(hessenberg(current_order, one_less_order)) + &
+     &                             abs(hessenberg(one_less_order, (current_order - 1)))
+                    next_diag = 0.75_pv * subdiag_sum
+                    eigen_approx = next_diag
+                    offdiag_product = -0.4375_pv * subdiag_sum**2
+                end if
+
+                num_iterations = num_iterations + 1
+
+                !----------------------------------------------------------------
+                ! Look for two consecutive small subdiagonal elements by scanning
+                ! upward from index (current_order-2) down to l.
+                !----------------------------------------------------------------
+                do m = current_order - 2, l, -1
+                    z = hessenberg(m, m)
+                    temp_p = eigen_approx - z
+                    temp_q = next_diag - z
+                    ! Compute a modified subdiagonal term:
+                    temp_r = ( temp_p * temp_q - offdiag_product ) / hessenberg(m+1, m) + &
+                             hessenberg(m, m+1)
+                    temp_val = hessenberg(m+1, m+1) - z - temp_p - temp_q
+                    temp_r = hessenberg(m+2, m+1)  ! reuse variable for the next subdiagonal element
+                    subdiag_sum = abs(temp_r) + abs(temp_val) + abs(temp_r)
+                    temp_p = temp_r / subdiag_sum
+                    temp_q = temp_val / subdiag_sum
+                    temp_r = temp_r / subdiag_sum
+                    if (m == l) exit
+                    if ( abs(hessenberg(m, m-1))*(abs(temp_q)+abs(temp_r)) <= &
+                         eps*abs(temp_r)*( abs(hessenberg(m-1, m-1)) + abs(z) + &
+                         abs(hessenberg(m+1, m+1)) ) ) then
+                        exit
+                    end if
+                end do
+
+                !----------------------------------------------------------------
+                ! Set to zero any elements that have become negligibly small,
+                ! thus preserving the Hessenberg structure.
+                !----------------------------------------------------------------
+                do i = m+2, current_order
+                    hessenberg(i, i-2) = 0.0_pv
+                end do
+                do i = m+3, current_order
+                    hessenberg(i, i-3) = 0.0_pv
+                end do
+
+                !----------------------------------------------------------------
+                ! Perform a double QR step on the submatrix spanning rows l to
+                ! current_order and columns m to current_order.
+                !----------------------------------------------------------------
+                do k = m, one_less_order
+                    not_last = (k /= one_less_order)
+                    if (k /= m) then
+                        temp_p = hessenberg(k, k-1)
+                        temp_q = hessenberg(k+1, k-1)
+                        if (not_last) then
+                            temp_r = hessenberg(k+2, k-1)
+                        else
+                            temp_r = 0.0_pv
+                        end if
+                        x = abs(temp_p) + abs(temp_q) + abs(temp_r)
+                        if (x == 0.0_pv) cycle
+                        temp_p = temp_p / x
+                        temp_q = temp_q / x
+                        temp_r = temp_r / x
+                    else
+                        ! For k==m the values from the previous QR step remain.
+                        temp_p = hessenberg(k, k-1)
+                        temp_q = hessenberg(k+1, k-1)
+                        if ((k /= m) .and. not_last) then
+                            temp_r = hessenberg(k+2, k-1)
+                        else
+                            temp_r = 0.0_pv
+                        end if
+                    end if
+                    s = sqrt( temp_p**2 + temp_q**2 + temp_r**2 )
+                    if (temp_p < 0.0_pv) s = -s
+                    if (k /= m) then
+                        hessenberg(k, k-1) = -s * x
+                    elseif (l /= m) then
+                        hessenberg(k, k-1) = -hessenberg(k, k-1)
+                    end if
+                    temp_p = temp_p + s
+                    x = temp_p / s
+                    y = temp_q / s
+                    z = temp_r / s
+                    temp_q = temp_q / temp_p
+                    temp_r = temp_r / temp_p
+
+                    !-----------------------
+                    ! Row modification:
+                    !-----------------------
+                    do j = k, current_order
+                        temp_val = hessenberg(k, j) + temp_q * hessenberg(k+1, j)
+                        if (not_last) then
+                            temp_val = temp_val + temp_r * hessenberg(k+2, j)
+                            hessenberg(k+2, j) = hessenberg(k+2, j) - temp_val * z
+                        end if
+                        hessenberg(k+1, j) = hessenberg(k+1, j) - temp_val * y
+                        hessenberg(k, j)   = hessenberg(k, j)   - temp_val * x
+                    end do
+
+                    !-----------------------
+                    ! Column modification:
+                    !-----------------------
+                    if (k + 3 < current_order) then
+                        j = k + 3
+                    else
+                        j = current_order
+                    end if
+                    do i = l, j
+                        temp_val = x * hessenberg(i, k) + y * hessenberg(i, k+1)
+                        if (not_last) then
+                            temp_val = temp_val + z * hessenberg(i, k+2)
+                            hessenberg(i, k+2) = hessenberg(i, k+2) - temp_val * temp_r
+                        end if
+                        hessenberg(i, k+1) = hessenberg(i, k+1) - temp_val * temp_q
+                        hessenberg(i, k)   = hessenberg(i, k)   - temp_val
+                    end do
+                end do
+
+                cycle  ! End of this QR step; restart main loop.
+            end if
+        end if
+    end do main_loop
 
 end subroutine hqr_eigen_hessenberg
+
+
   
 !-----------------------------------------------------------------------------------------------
 end module MOD_Roots
