@@ -28,7 +28,6 @@ module MOD_Roots
         logical :: show_results    !Show the root and the status when fun_zero finishes.
 
     end type fun_zero_options
-
 contains
   
 subroutine fun_zero(f_pointer, bounds, status, root, niter, f0_options)
@@ -976,8 +975,6 @@ subroutine hqr_eigen_hessenberg(order, hessenberg, eigen_real, eigen_imag, itera
     end do main_loop
 
 end subroutine hqr_eigen_hessenberg
-
-
   
 !-----------------------------------------------------------------------------------------------
 end module MOD_Roots

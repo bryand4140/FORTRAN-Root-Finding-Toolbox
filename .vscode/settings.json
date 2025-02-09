@@ -8,12 +8,12 @@
   //--------------------------------------------------------------------------------------------------------------------------
   // Set the path to the Fortran compiler executable. This is required for the extension to work.
   // Path if using my laptop
-  // ----> "fortran.linterExecutablePath": "C:\\Users\\bryan\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\fortls.exe",
+  // ----> "fortran.linterExecutablePath": "C:\\Users\\bryan\\AppData\\Local\\Programs\\Python\\Python313\\Scripts\\fortls.exe",
 
   // Path if using my desktop at CU Boulder
   // ----> "fortran.linterExecutablePath": "C:\\Users\\brdu8458\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python311\\Scripts\\fortls.exe",
 
-  "fortran.linterExecutablePath": "C:\\Users\\bryan\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\fortls.exe",
+  "fortran.linterExecutablePath": "C:\\Users\\bryan\\AppData\\Local\\Programs\\Python\\Python313\\Scripts\\fortls.exe",
 
   //"fortran.linterExecutablePath": "C:\\Users\\brdu8458\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python311\\Scripts\\fortls.exe",
 
@@ -37,8 +37,8 @@
   "workbench.colorCustomizations": {
       "editorRuler.foreground": "#458cff"
   },
-  "fortran.fortls.configure": "C:\\Users\\bryan\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\",
-  "fortran.fortls.path": "C:\\Users\\bryan\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\fortls.exe",
-  "fortran.linter.compilerPath": "C:\\Users\\bryan\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\fortls.exe",
+  "fortran.fortls.configure": "C:\\Users\\bryan\\AppData\\Local\\Programs\\Python\\Python313\\Scripts\\",
+  "fortran.fortls.path": "C:\\Users\\bryan\\AppData\\Local\\Programs\\Python\\Python313\\Scripts\\fortls.exe",
+  "fortran.linter.compilerPath": "C:\\Users\\bryan\\AppData\\Local\\Programs\\Python\\Python313\\Scripts\\fortls.exe",
 
 }
