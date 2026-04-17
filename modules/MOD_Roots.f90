@@ -7,6 +7,8 @@ module MOD_Roots
     public :: fun_zero
     public :: sv_function
     public :: poly_roots
+    public :: newton_raphson
+    public :: init_fun_zero_options
     
 
     abstract interface
@@ -20,110 +22,84 @@ module MOD_Roots
 
 
     type, public :: fun_zero_options
-        ! Optional inputs for fun_zero.
-        real(pv) :: tolerance
-        integer  :: maxiter
+        ! Optional inputs for fun_zero / newton_raphson.
+        ! Default values are provided so that an uninitialized struct behaves sensibly.
+        real(pv) :: tolerance       = 1.0e-6_pv
+        integer  :: maxiter         = 500
 
-        logical :: show_iterations !Show the iteration number and the current root estimate.
-        logical :: show_results    !Show the root and the status when fun_zero finishes.
+        logical :: show_iterations  = .false. !Show the iteration number and the current root estimate.
+        logical :: show_results     = .true.  !Show the root and the status when the solver finishes.
 
     end type fun_zero_options
 contains
   
 subroutine fun_zero(f_pointer, bounds, status, root, niter, f0_options)
     ! General Description: Finds a zero of f(x) in the interval [a, b] such that f(a)*f(b) < 0.
+    !   Uses a hybrid Brent / bisection algorithm for robust, fast convergence.
     ! Inputs:
     !   f_pointer  - A pointer to the function f(x) to be evaluated.
     !   bounds     - A 2-element array containing the lower and upper bounds of the interval [a, b].
     ! Optional Inputs:
     !   f0_options - A derived type containing additional options:
     !                .tolerance, .maxiter, .show_iterations, .show_results.
+    !                All fields have sensible defaults; see fun_zero_options type definition.
     ! Outputs:
     !   status     - An integer indicating the status of the root finding process.
     !                0 - The root was found.
     !                1 - The interval does not bracket a root.
     !                2 - The maximum number of iterations was reached.
+    !                3 - f(x) is NaN at one of the initial bounds.
     !   root       - The computed (approximate) root of the function.
     ! Optional Outputs:
     !   niter      - The number of iterations required to find the root.
 
     implicit none
-    procedure(sv_function), pointer :: f_pointer   
+    procedure(sv_function), pointer :: f_pointer
     real(pv), intent(in) :: bounds(2)
-    integer, intent(out) :: status 
+    integer, intent(out) :: status
     real(pv), intent(out) :: root
     integer, intent(out), optional :: niter
-    type(fun_zero_options), intent(inout), optional :: f0_options
+    type(fun_zero_options), intent(in), optional :: f0_options
 
     ! Local variables.
     real(pv) :: a_local, b_local, c_local, d, e
     real(pv) :: fa, fb, fc, s, m, tol_act, tol_local
     integer :: iter, maxit_local
-    real(pv), parameter :: eps = 1.0e-8_pv
+    ! Use machine epsilon for the convergence tolerance term (Brent's algorithm).
+    real(pv), parameter :: eps = epsilon(1.0_pv)
     ! Temporary variables for swapping.
     real(pv) :: temp, temp_val
-
-    real(pv) :: current_f_value
-    type(fun_zero_options) :: default_options
+    type(fun_zero_options) :: opts
 
     logical :: show_iter_local, show_res_local
 
     !-------------------------------------------------------
-    ! Set tolerance and maximum iterations using the options type.
-    ! If f0_options is not provided, use defaults.
-    !
-    call init_fun_zero_options(default_options)
-
+    ! Merge user-supplied options with defaults.
+    ! Because fun_zero_options fields carry default values, opts is already
+    ! initialised correctly via init_fun_zero_options; user overrides are applied below.
+    call init_fun_zero_options(opts)
     if (present(f0_options)) then
+        if (f0_options%tolerance > 0.0_pv) opts%tolerance = f0_options%tolerance
+        if (f0_options%maxiter   > 0)       opts%maxiter   = f0_options%maxiter
+        ! Use the caller's logical flags directly – .false. is a valid explicit choice.
+        opts%show_iterations = f0_options%show_iterations
+        opts%show_results    = f0_options%show_results
 
-        !Check to see if the user has provided a value for the tolerance.
-        if(f0_options%tolerance <= 0.0_pv) then
+        if (opts%tolerance <= 0.0_pv) then
             print*, "Warning: Tolerance is not assigned within f0_options."
             print*, "Using default tolerance value."
-            tol_local = default_options%tolerance
-        else
-            tol_local = f0_options%tolerance
+            opts%tolerance = 1.0e-6_pv
         end if
-
-        !Check to see if the user has provided a value for the maximum 
-        !number of iterations.
-        if(f0_options%maxiter <= 0) then
-            print*, "Warning: Maximum number of iterations is not assigned within f0_options."
-            print*, "Using default maximum number of iterations."
-            maxit_local = default_options%maxiter
-        else
-            maxit_local = f0_options%maxiter
-        end if
-
-        !Check to see if the user has provided a value for the show_iterations flag.
-        if (.not. f0_options%show_iterations) then
-            !User has not provided a value for show_iterations -- Use the default value.
-            show_iter_local = default_options%show_iterations
-        else
-            show_iter_local = f0_options%show_iterations
-        end if
-
-        !Check to see if the user has provided a value for the show_results flag.
-        if (.not. f0_options%show_results) then
-            !User has not provided a value for show_results -- Use the default value.
-            show_res_local = default_options%show_results
-        else
-            show_res_local = f0_options%show_results
-        end if
-
-        !Check to see if the user has entered a low value for the maximum 
-        !number of iterations.
-        if(f0_options%maxiter < 10) then
+        if (opts%maxiter < 10) then
             print*, "Warning: Maximum number of iterations is set to a low value."
             print*, "This may affect the accuracy of the root finding process."
         end if
-
-    else !If f0_options is not provided, use default values.
-        tol_local       = default_options%tolerance
-        maxit_local     = default_options%maxiter
-        show_iter_local = default_options%show_iterations
-        show_res_local  = default_options%show_results
     end if
+
+    tol_local       = opts%tolerance
+    maxit_local     = opts%maxiter
+    show_iter_local = opts%show_iterations
+    show_res_local  = opts%show_results
 
     ! Initialize the bracketing interval.
     a_local = bounds(1)
@@ -131,32 +107,29 @@ subroutine fun_zero(f_pointer, bounds, status, root, niter, f0_options)
     fa = f_pointer(a_local)
     fb = f_pointer(b_local)
 
-    !Check to see if fa or fb is NaN.
+    ! Check for NaN at the bounds – return status 3 instead of stopping the program.
     if (IEEE_IS_NAN(fa)) then
         write(*,"(A, ES12.4)") "Error: f(x) is undefined at the bound x =", a_local
-        print*, " " !Spacer
-        print*, " " !Spacer
-        !Stop the program.
-        stop
+        status = 3
+        root   = a_local
+        if (present(niter)) niter = 0
+        return
     end if
 
     if (IEEE_IS_NAN(fb)) then
         write(*,"(A, ES12.4)") "Error: f(x) is undefined at the bound x =", b_local
-        print*, " " !Spacer
-        print*, " " !Spacer
-        !Stop the program.
-        stop
+        status = 3
+        root   = b_local
+        if (present(niter)) niter = 0
+        return
     end if
 
     ! Check that the initial interval brackets a root.
-    if (fa * fb >= 0.0d0) then
+    if (fa * fb >= 0.0_pv) then
         print*, "Error: The interval [", a_local, ", ", b_local, "] does not bracket a root."
-        print*, "Status: 1"
         status = 1
-        root = a_local
-        if (present(niter)) then
-            niter = 0
-        end if
+        root   = a_local
+        if (present(niter)) niter = 0
         return
     end if
 
@@ -167,7 +140,7 @@ subroutine fun_zero(f_pointer, bounds, status, root, niter, f0_options)
 
     ! Main iteration loop.
     do iter = 1, maxit_local
-        if (fb * fc > 0.0d0) then
+        if (fb * fc > 0.0_pv) then
             ! Rename a_local and c_local so that b_local is the best approximation.
             c_local = a_local
             fc      = fa
@@ -176,7 +149,7 @@ subroutine fun_zero(f_pointer, bounds, status, root, niter, f0_options)
         end if
 
         if (abs(fc) < abs(fb)) then
-            ! Swap b_local and c_local (and corresponding function values)
+            ! Swap b_local and c_local (and corresponding function values).
             temp      = b_local
             b_local   = c_local
             c_local   = temp
@@ -186,50 +159,46 @@ subroutine fun_zero(f_pointer, bounds, status, root, niter, f0_options)
             fc        = temp_val
         end if
 
-        tol_act = 2.0d0 * eps * abs(b_local) + tol_local / 2.0d0
-        m = (c_local - b_local) / 2.0d0
+        tol_act = 2.0_pv * eps * abs(b_local) + tol_local / 2.0_pv
+        m = (c_local - b_local) / 2.0_pv
 
         ! Optionally show iteration details.
+        ! fb already equals f(b_local) from the previous step; no extra evaluation needed.
         if (show_iter_local) then
-            current_f_value = f_pointer(b_local)
-
-            !Check to see if current_f_value is NaN.
-            if (IEEE_IS_NAN(current_f_value)) then
+            if (IEEE_IS_NAN(fb)) then
                 write(*,"(A, ES12.4)") "Error: f(x) is NaN at x =", b_local
-                print*, " " !Spacer
-                print*, " " !Spacer
-                !Stop the program.
-                stop
-            else
-                write(*,"(A, I5, A, ES12.4)") "Iteration:", iter, "     f(x) =", current_f_value
+                status = 3
+                root   = b_local
+                if (present(niter)) niter = iter
+                return
             end if
+            write(*,"(A, I5, A, ES12.4, A, ES12.4)") &
+                "Iteration:", iter, "    x =", b_local, "    f(x) =", fb
         end if
 
-
         ! Check for convergence.
-        if (abs(m) <= tol_act .or. fb == 0.0d0) then
+        if (abs(m) <= tol_act .or. fb == 0.0_pv) then
             root = b_local
-            if (present(niter)) then
-                niter = iter
-            end if
+            if (present(niter)) niter = iter
             status = 0
             if (show_res_local) then
-                print*, " " !Spacer
-                write(*,"(A, ES12.5, A, I10)") "Root found: ", root, " after ", iter, " iterations."
-                print*,"Status: ", status
-                print*, " " 
+                print*, " "
+                write(*,"(A, ES12.5, A, I0, A)") &
+                    "Root found: ", root, " after ", iter, " iterations."
+                print*, "Status: ", status
+                print*, " "
             end if
             return
         end if
 
         ! Decide whether to use interpolation or bisection.
         if (abs(e) >= tol_act .and. abs(fa) > abs(fb)) then
-            ! Attempt inverse quadratic interpolation (or secant if only two points available).
+            ! Attempt secant interpolation.
             s = b_local - fb * (b_local - a_local) / (fb - fa)
-            ! Check conditions for interpolation to be acceptable.
-            if ((s < (3.0d0 * a_local + b_local) / 4.0d0) .or. (s > b_local) .or. &
-                (abs(s - b_local) >= abs(m) / 2.0d0)) then
-                ! If not acceptable, use bisection.
+            ! Check conditions for the interpolation step to be acceptable.
+            if ((s < (3.0_pv * a_local + b_local) / 4.0_pv) .or. (s > b_local) .or. &
+                (abs(s - b_local) >= abs(m) / 2.0_pv)) then
+                ! If not acceptable, fall back to bisection.
                 s = b_local + m
                 e = d
                 d = m
@@ -256,25 +225,24 @@ subroutine fun_zero(f_pointer, bounds, status, root, niter, f0_options)
 
     ! Maximum iterations reached.
     root = b_local
-    if (present(niter)) then
-        niter = iter
-    end if
+    if (present(niter)) niter = iter
     status = 2
-    if (present(f0_options)) then
-        if (f0_options%show_results) then
-            write(*,*) "Maximum iterations reached. Approximate root: ", root
-        end if
+    if (show_res_local) then
+        write(*,"(A, ES12.5)") &
+            "Warning: Maximum iterations reached. Approximate root: ", root
     end if
 end subroutine fun_zero
 
 
 subroutine init_fun_zero_options(f0_options)
-    ! General Description: Initializes the fun_zero_options type.
+    ! General Description: Initialises a fun_zero_options variable to its default values.
+    !   Calling this is optional when the type fields already carry default values
+    !   (Fortran 2003 component initialisation), but is useful for explicit resets.
     ! Outputs:
-    !   f0_options - The fun_zero_options type to be initialized.
+    !   f0_options - The fun_zero_options variable to initialise.
 
     type(fun_zero_options), intent(out) :: f0_options
-    f0_options%tolerance       = 1.0e-6
+    f0_options%tolerance       = 1.0e-6_pv
     f0_options%maxiter         = 500
     f0_options%show_iterations = .false.
     f0_options%show_results    = .true.
@@ -332,7 +300,7 @@ subroutine poly_roots(degree, coeffs, roots, status_flag, accuracy_hint)
     real(pv), intent(out), optional :: accuracy_hint   ! Accuracy estimate (if requested).
 
     ! Machine parameters:
-    real(pv), parameter :: eps = 1.0e-8_pv
+    real(pv), parameter :: eps = epsilon(1.0_pv)
 
     ! Local working arrays:
     real(pv), allocatable :: companion_matrix(:,:)  ! Companion matrix (degree x degree)
@@ -347,12 +315,14 @@ subroutine poly_roots(degree, coeffs, roots, status_flag, accuracy_hint)
     ! Check for invalid input arguments.
     !--------------------------------------------------------------------
     if (degree <= 0) then
-        status_flag = 1
+        ! Return -1 to distinguish from QR solver error codes (which are positive).
+        status_flag = -1
         return
     end if
     if (coeffs(1) == 0.0_pv) then
-        ! Leading coefficient is zero: cannot form a proper monic polynomial.
-        status_flag = 2
+        ! Leading coefficient is zero: cannot form a proper companion matrix.
+        ! Return -2 to distinguish from QR solver error codes.
+        status_flag = -2
         return
     end if
 
@@ -381,40 +351,33 @@ subroutine poly_roots(degree, coeffs, roots, status_flag, accuracy_hint)
     call hqr_eigen_hessenberg(degree, companion_matrix, roots_real, roots_imag, iteration_counts, status_flag)
     if (status_flag /= 0) then
         write(*, '(A,1X,I4)') 'Abnormal return from hqr_eigen_hessenberg. status_flag = ', status_flag
-        if (status_flag == 1) write(*, '(A)') 'Matrix is completely zero.'
-        if (status_flag == 2) write(*, '(A)') 'QR iteration did not converge.'
-        if (status_flag > 3)  write(*, '(A)') 'Arguments violate the condition.'
+        if (status_flag == 1) write(*, '(A)') 'QR iteration did not converge.'
+        deallocate(companion_matrix, iteration_counts)
         return
     else
-        !Put the results into the Roots array.
+        ! Store results in the complex roots array.
         do i = 1, degree
             roots(i) = cmplx(roots_real(i), roots_imag(i), kind=pv)
         end do
     end if
 
-
-
     !--------------------------------------------------------------------
     ! If an accuracy hint is requested, compute it.
-    !   The hint is based on the machine precision (eps), the degree of the
-    !   polynomial, the total number of QR iterations, and the Frobenius norm of
-    !   the balanced companion matrix.
+    !   The hint is based on machine precision, the degree, the total number
+    !   of QR iterations, and the Frobenius norm of the balanced companion matrix.
     !--------------------------------------------------------------------
     if (present(accuracy_hint)) then
-        ! Compute the Frobenius norm of the balanced companion matrix.
         frob_norm = frobenius_norm_companion(degree, companion_matrix)
 
-        ! Sum the total number of QR iterations.
         total_iterations = 0
         do i = 1, degree
-            if (iteration_counts(i) > 0) then
-                total_iterations = total_iterations + iteration_counts(i)
-            end if
+            if (iteration_counts(i) > 0) total_iterations = total_iterations + iteration_counts(i)
         end do
 
-        ! Calculate the accuracy hint.
-        accuracy_hint = eps * degree * total_iterations * frob_norm
+        accuracy_hint = eps * real(degree, pv) * real(total_iterations, pv) * frob_norm
     end if
+
+    deallocate(companion_matrix, iteration_counts)
 
 end subroutine poly_roots
 
@@ -743,15 +706,18 @@ subroutine hqr_eigen_hessenberg(order, hessenberg, eigen_real, eigen_imag, itera
     real(pv) :: offdiag_product     ! Product: hessenberg(current_order, one_less_order)*hessenberg(one_less_order, current_order)
     real(pv) :: shift_accum         ! Accumulates shifts over iterations.
     real(pv) :: subdiag_sum         ! Sum of magnitudes of selected subdiagonal elements.
-    real(pv) :: temp_p, temp_q, temp_r  ! Temporary variables for QR computations.
-    real(pv) :: temp_val, temp_shift    ! Temporary values used during exceptional shifts.
+    real(pv) :: temp_p = 0.0_pv, temp_q = 0.0_pv, temp_r = 0.0_pv  ! Temporary variables for QR computations.
+    real(pv) :: temp_val              ! Temporary values used during exceptional shifts.
+    real(pv) :: temp_r_old              ! Saves the first-column HQR vector element before temp_r is overwritten.
+    real(pv) :: p_save, q_save, r_save ! Householder vector from the m-search, used at k==m in the QR step.
     real(pv) :: x, y, z           ! Used in various computations (e.g., shift approximations)
-    real(pv) :: s                 ! --- NEW: used for computing a norm in the QR step.
+    real(pv) :: s                 ! Used for computing a norm in the QR step.
     logical :: small_subdiag_found, not_last
 
     ! Maximum iterations allowed per eigenvalue.
     integer, parameter :: max_iterations = 500
-    real(pv), parameter :: eps = 1.0e-8_pv
+    ! Use machine epsilon for the subdiagonal negligibility test.
+    real(pv), parameter :: eps = epsilon(1.0_pv)
 
     ! Initialization.
     current_order = order
@@ -866,22 +832,32 @@ subroutine hqr_eigen_hessenberg(order, hessenberg, eigen_real, eigen_imag, itera
                     z = hessenberg(m, m)
                     temp_p = eigen_approx - z
                     temp_q = next_diag - z
-                    ! Compute a modified subdiagonal term:
-                    temp_r = ( temp_p * temp_q - offdiag_product ) / hessenberg(m+1, m) + &
-                             hessenberg(m, m+1)
+                    ! Compute the first component of the Householder starting vector.
+                    ! Save it in temp_r_old before temp_r is reused below.
+                    temp_r_old = ( temp_p * temp_q - offdiag_product ) / hessenberg(m+1, m) + &
+                                 hessenberg(m, m+1)
                     temp_val = hessenberg(m+1, m+1) - z - temp_p - temp_q
-                    temp_r = hessenberg(m+2, m+1)  ! reuse variable for the next subdiagonal element
-                    subdiag_sum = abs(temp_r) + abs(temp_val) + abs(temp_r)
-                    temp_p = temp_r / subdiag_sum
-                    temp_q = temp_val / subdiag_sum
-                    temp_r = temp_r / subdiag_sum
+                    ! Third component of the Householder starting vector.
+                    temp_r = hessenberg(m+2, m+1)
+                    ! Normalise all three components together (previously temp_r_old was
+                    ! lost and temp_r appeared twice, giving a wrong normalisation).
+                    subdiag_sum = abs(temp_r_old) + abs(temp_val) + abs(temp_r)
+                    temp_p = temp_r_old / subdiag_sum
+                    temp_q = temp_val   / subdiag_sum
+                    temp_r = temp_r     / subdiag_sum
                     if (m == l) exit
                     if ( abs(hessenberg(m, m-1))*(abs(temp_q)+abs(temp_r)) <= &
-                         eps*abs(temp_r)*( abs(hessenberg(m-1, m-1)) + abs(z) + &
+                         eps*abs(temp_p)*( abs(hessenberg(m-1, m-1)) + abs(z) + &
                          abs(hessenberg(m+1, m+1)) ) ) then
                         exit
                     end if
                 end do
+
+                ! Save the Householder vector from the m-search for use at k==m
+                ! in the QR step below (avoids the out-of-bounds read when m==1).
+                p_save = temp_p
+                q_save = temp_q
+                r_save = temp_r
 
                 !----------------------------------------------------------------
                 ! Set to zero any elements that have become negligibly small,
@@ -914,14 +890,17 @@ subroutine hqr_eigen_hessenberg(order, hessenberg, eigen_real, eigen_imag, itera
                         temp_q = temp_q / x
                         temp_r = temp_r / x
                     else
-                        ! For k==m the values from the previous QR step remain.
-                        temp_p = hessenberg(k, k-1)
-                        temp_q = hessenberg(k+1, k-1)
-                        if ((k /= m) .and. not_last) then
-                            temp_r = hessenberg(k+2, k-1)
-                        else
-                            temp_r = 0.0_pv
-                        end if
+                        ! Use the Householder vector saved from the m-search.
+                        ! Reading hessenberg(k, k-1) at k==m (possibly m==1, i.e., column 0)
+                        ! would be an out-of-bounds access and gives the wrong values.
+                        temp_p = p_save
+                        temp_q = q_save
+                        temp_r = r_save
+                        x = abs(temp_p) + abs(temp_q) + abs(temp_r)
+                        if (x == 0.0_pv) cycle
+                        temp_p = temp_p / x
+                        temp_q = temp_q / x
+                        temp_r = temp_r / x
                     end if
                     s = sqrt( temp_p**2 + temp_q**2 + temp_r**2 )
                     if (temp_p < 0.0_pv) s = -s
@@ -976,5 +955,124 @@ subroutine hqr_eigen_hessenberg(order, hessenberg, eigen_real, eigen_imag, itera
 
 end subroutine hqr_eigen_hessenberg
   
+
+!-----------------------------------------------------------------------------------------------
+subroutine newton_raphson(f_pointer, df_pointer, x0, status, root, niter, nr_options)
+    !********************************************************************
+    ! General Description:
+    !   Finds a root of f(x) using Newton-Raphson iteration:
+    !       x_{n+1} = x_n - f(x_n) / f'(x_n)
+    !
+    !   This method converges quadratically near a simple root but requires
+    !   an analytic (or numerical) derivative and a good initial guess.
+    !
+    ! Inputs:
+    !   f_pointer   - Procedure pointer to f(x).
+    !   df_pointer  - Procedure pointer to f'(x).
+    !   x0          - Initial guess for the root.
+    ! Optional Inputs:
+    !   nr_options  - A fun_zero_options struct controlling tolerance, maxiter,
+    !                 show_iterations, and show_results. Defaults are applied when absent.
+    ! Outputs:
+    !   status      - Integer return code:
+    !                   0 - Root found within tolerance.
+    !                   1 - Derivative is zero (division by zero would occur).
+    !                   2 - Maximum iterations reached without convergence.
+    !                   3 - f(x) or f'(x) is NaN during iteration.
+    !   root        - The computed (approximate) root.
+    ! Optional Outputs:
+    !   niter       - Number of iterations performed.
+    !********************************************************************
+    implicit none
+
+    procedure(sv_function), pointer, intent(in) :: f_pointer
+    procedure(sv_function), pointer, intent(in) :: df_pointer
+    real(pv), intent(in)  :: x0
+    integer,  intent(out) :: status
+    real(pv), intent(out) :: root
+    integer,  intent(out), optional :: niter
+    type(fun_zero_options), intent(in), optional :: nr_options
+
+    ! Local variables.
+    real(pv) :: x_cur, fx, dfx, dx
+    integer  :: iter, maxit_local
+    real(pv) :: tol_local
+    logical  :: show_iter_local, show_res_local
+    type(fun_zero_options) :: opts
+
+    !-- Merge options with defaults -------------------------------------------
+    call init_fun_zero_options(opts)
+    if (present(nr_options)) then
+        if (nr_options%tolerance > 0.0_pv) opts%tolerance = nr_options%tolerance
+        if (nr_options%maxiter   > 0)       opts%maxiter   = nr_options%maxiter
+        opts%show_iterations = nr_options%show_iterations
+        opts%show_results    = nr_options%show_results
+    end if
+
+    tol_local       = opts%tolerance
+    maxit_local     = opts%maxiter
+    show_iter_local = opts%show_iterations
+    show_res_local  = opts%show_results
+
+    !-- Iteration -------------------------------------------------------------
+    x_cur = x0
+
+    do iter = 1, maxit_local
+        fx  = f_pointer(x_cur)
+        dfx = df_pointer(x_cur)
+
+        ! Guard against NaN in function or derivative evaluations.
+        if (IEEE_IS_NAN(fx) .or. IEEE_IS_NAN(dfx)) then
+            write(*,"(A, ES12.4)") "Error: NaN encountered at x =", x_cur
+            status = 3
+            root = x_cur
+            if (present(niter)) niter = iter
+            return
+        end if
+
+        ! Guard against zero derivative (method is undefined).
+        if (dfx == 0.0_pv) then
+            write(*,"(A, ES12.4)") "Error: Derivative is zero at x =", x_cur
+            status = 1
+            root = x_cur
+            if (present(niter)) niter = iter
+            return
+        end if
+
+        dx    = fx / dfx
+        x_cur = x_cur - dx
+
+        if (show_iter_local) then
+            write(*,"(A, I5, A, ES12.4, A, ES12.4)") &
+                "Iteration:", iter, "    x =", x_cur, "    f(x) =", fx
+        end if
+
+        ! Convergence test: the correction |dx| is smaller than the tolerance.
+        if (abs(dx) <= tol_local + epsilon(1.0_pv) * abs(x_cur)) then
+            root = x_cur
+            status = 0
+            if (present(niter)) niter = iter
+            if (show_res_local) then
+                print*, " "
+                write(*,"(A, ES12.5, A, I0, A)") &
+                    "Root found: ", root, " after ", iter, " iterations."
+                print*, "Status: ", status
+                print*, " "
+            end if
+            return
+        end if
+    end do
+
+    ! Maximum iterations reached.
+    root = x_cur
+    status = 2
+    if (present(niter)) niter = iter
+    if (show_res_local) then
+        write(*,"(A, ES12.5)") &
+            "Warning: Maximum iterations reached. Approximate root: ", root
+    end if
+
+end subroutine newton_raphson
+
 !-----------------------------------------------------------------------------------------------
 end module MOD_Roots

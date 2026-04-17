@@ -6,7 +6,6 @@ program main
     integer, parameter :: degree = 4
     real(pv) :: coeffs(degree + 1)
     integer :: status_flag, i
-    real(pv) :: roots_real(degree), roots_imag(degree)
     complex(pv),allocatable :: roots(:)
 
 
