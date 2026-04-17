@@ -1,9 +1,10 @@
 # Compiler and flags
-FC = gfortran                   # Fortran compiler
-FFLAGS = -w -O2 -J$(BUILD_DIR)  # Compiler flags:
-                                # -w    : Disable all warnings
-                                # -O2   : Optimization level 2
-                                # -J    : Direct .mod files to build directory
+FC = gfortran                           # Fortran compiler
+FFLAGS = -Wall -Wextra -O2 -J$(BUILD_DIR) # Compiler flags:
+                                          # -Wall  : Enable common warnings
+                                          # -Wextra: Enable extra warnings
+                                          # -O2   : Optimization level 2
+                                          # -J    : Direct .mod files to build directory
 
 # Directories
 SRC_DIR = src
@@ -49,15 +50,13 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.f90 | $(BUILD_DIR)
 
 # Ensure build directory exists
 $(BUILD_DIR):
-	mkdir $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)
 
 # Clean target to remove build artifacts and executables
 clean:
-	if exist $(BUILD_DIR) rmdir /s /q $(BUILD_DIR)
-	if exist main.exe del /f /q main.exe
-	if exist main_debug.exe del /f /q main_debug.exe
-	if exist test.exe del /f /q test.exe
-	del /f /q *.o *.mod > NUL 2>&1
+	rm -rf $(BUILD_DIR)
+	rm -f main.exe main_debug.exe test.exe
+	rm -f *.o *.mod
 
 # Phony targets to avoid conflicts with files named 'all', 'clean', etc.
 .PHONY: all clean main.exe test.exe
