@@ -706,7 +706,9 @@ subroutine hqr_eigen_hessenberg(order, hessenberg, eigen_real, eigen_imag, itera
     real(pv) :: offdiag_product     ! Product: hessenberg(current_order, one_less_order)*hessenberg(one_less_order, current_order)
     real(pv) :: shift_accum         ! Accumulates shifts over iterations.
     real(pv) :: subdiag_sum         ! Sum of magnitudes of selected subdiagonal elements.
-    real(pv) :: temp_p = 0.0_pv, temp_q = 0.0_pv, temp_r = 0.0_pv  ! Temporary variables for QR computations.
+    real(pv) :: temp_p, temp_q, temp_r  ! Temporary variables for QR computations.
+    ! Note: explicit initialisation below (not at declaration) avoids the implicit
+    ! SAVE attribute that Fortran applies to variables initialised at declaration time.
     real(pv) :: temp_val              ! Temporary values used during exceptional shifts.
     real(pv) :: temp_r_old              ! Saves the first-column HQR vector element before temp_r is overwritten.
     real(pv) :: p_save, q_save, r_save ! Householder vector from the m-search, used at k==m in the QR step.
@@ -721,8 +723,11 @@ subroutine hqr_eigen_hessenberg(order, hessenberg, eigen_real, eigen_imag, itera
 
     ! Initialization.
     current_order = order
-    status_flag = 0
-    shift_accum = 0.0_pv
+    status_flag   = 0
+    shift_accum   = 0.0_pv
+    ! Explicit initialisation (avoids SAVE semantics from declaration-time assignment).
+    temp_p = 0.0_pv; temp_q = 0.0_pv; temp_r = 0.0_pv
+    p_save = 0.0_pv; q_save = 0.0_pv; r_save = 0.0_pv
 
     main_loop: do
         ! If the current submatrix is empty, all eigenvalues have been found.
@@ -1047,8 +1052,9 @@ subroutine newton_raphson(f_pointer, df_pointer, x0, status, root, niter, nr_opt
                 "Iteration:", iter, "    x =", x_cur, "    f(x) =", fx
         end if
 
-        ! Convergence test: the correction |dx| is smaller than the tolerance.
-        if (abs(dx) <= tol_local + epsilon(1.0_pv) * abs(x_cur)) then
+        ! Convergence test: the step |dx| must be within the user tolerance plus a
+        ! relative guard of 10*eps to prevent premature termination due to rounding.
+        if (abs(dx) <= tol_local + 10.0_pv * epsilon(1.0_pv) * abs(x_cur)) then
             root = x_cur
             status = 0
             if (present(niter)) niter = iter
